@@ -20,6 +20,7 @@
     "test:helper": "node native/hook-helper/run.mjs test",
     "dist": "npm run build:helper && electron-vite build && electron-builder --win --publish never",
     "dist:mac": "npm run build:helper && electron-vite build && electron-builder --mac --arm64 --publish never",
+    "dist:linux": "npm run build:helper && electron-vite build && electron-builder --linux AppImage --x64 --publish never",
     "dev:site": "vite --config site/vite.config.ts",
     "build:site": "vite build --config site/vite.config.ts",
     "media": "npm run build:site && electron tools/capture-media/capture.mjs"
@@ -79,6 +80,13 @@
       }
     },
     "dmg": { "artifactName": "lolPing-${version}-arm64.dmg" },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "artifactName": "lolPing-${version}-x86_64.AppImage",
+      "extraResources": [{ "from": "native/hook-helper/build/hook-helper", "to": "hook-helper" }]
+    },
     "publish": [{ "provider": "github", "owner": "darrenprx", "repo": "lolPing" }]
   }
 }

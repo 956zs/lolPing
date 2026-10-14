@@ -54,3 +54,20 @@ jobs:
           name: lolPing-mac-arm64
           path: release/*.dmg
           retention-days: 14
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # The Linux helper links libevdev.
+      - run: sudo apt-get update && sudo apt-get install -y libevdev-dev
+      - run: npm ci
+      - run: npm run typecheck
+      # Builds the Linux hook-helper and runs the C++ tests. The TypeScript tests need the built helper.
+      - run: npm run test:helper
+      - run: npm test
+      - run: npm run build
