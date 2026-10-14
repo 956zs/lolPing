@@ -92,3 +92,23 @@ describe('macOS labels', () => {
     expect(vkLabel(0x50, 'mac')).toBe('P');
   });
 });
+
+describe('Linux labels', () => {
+  it('names the Win key Super, in the Windows order and look', () => {
+    expect(modLabels(MOD.win | MOD.ctrl | MOD.shift | MOD.alt, 'linux')).toEqual(['Ctrl', 'Alt', 'Shift', 'Super']);
+    expect(modLabels(0, 'linux')).toEqual([]);
+    expect(modLabels(MOD.win, 'win')).toEqual(['Win']);
+  });
+
+  it('joins hotkeys with plus signs', () => {
+    expect(hotkeyParts({ mods: MOD.ctrl | MOD.alt, vk: 0x50 }, 'linux')).toEqual(['Ctrl', 'Alt', 'P']);
+    expect(hotkeyLabel({ mods: MOD.ctrl | MOD.alt, vk: 0x50 }, 'linux')).toBe('Ctrl + Alt + P');
+    expect(hotkeyLabel({ mods: MOD.win | MOD.shift, vk: 0x70 }, 'linux')).toBe('Shift + Super + F1');
+  });
+
+  it('names keys the Windows way', () => {
+    expect(vkLabel(0x0d, 'linux')).toBe('Enter');
+    expect(vkLabel(0x08, 'linux')).toBe('Backspace');
+    expect(vkLabel(0x2e, 'linux')).toBe('Delete');
+  });
+});

@@ -1,6 +1,6 @@
 import type { Platform } from './platform';
 
-/** Modifier bitmask shared with the native helper (`toggleMods`). On macOS `win` is Command. */
+/** Modifier bitmask shared with the native helper (`toggleMods`). On macOS `win` is Command, on Linux Super. */
 export const MOD = { ctrl: 1, alt: 2, shift: 4, win: 8 } as const;
 
 /**
@@ -88,13 +88,13 @@ export function modLabels(mods: number, platform: Platform = 'win'): string[] {
   if (mods & MOD.ctrl) out.push('Ctrl');
   if (mods & MOD.alt) out.push('Alt');
   if (mods & MOD.shift) out.push('Shift');
-  if (mods & MOD.win) out.push('Win');
+  if (mods & MOD.win) out.push(platform === 'linux' ? 'Super' : 'Win');
   return out;
 }
 
 export const hotkeyParts = (h: Hotkey, platform: Platform = 'win'): string[] =>
   [...modLabels(h.mods, platform), vkLabel(h.vk, platform)];
-/** "Ctrl + Alt + P" on Windows, "⌃⌥P" on macOS. */
+/** "Ctrl + Alt + P" on Windows and Linux, "⌃⌥P" on macOS. */
 export const hotkeyLabel = (h: Hotkey, platform: Platform = 'win'): string =>
   hotkeyParts(h, platform).join(platform === 'mac' ? '' : ' + ');
 

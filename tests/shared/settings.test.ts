@@ -3,8 +3,8 @@ import { DEFAULT_CLICK_EMOTE, DEFAULT_EMOTE_WHEEL } from '../../src/shared/emote
 import { MOD } from '../../src/shared/keys';
 import { formatRoomCode, makeRoomCode } from '../../src/shared/roomCode';
 import {
-  DEFAULT_SETTINGS, keyboardTriggers, mergeSettings, normalizeSettings, overlaySettings, patchClashes, rendererPatch, sameTrigger,
-  triggerLabel, triggersClash,
+  DEFAULT_SETTINGS, keyboardTriggers, mergeSettings, normalizeSettings, offersCustomTrigger, overlaySettings, patchClashes,
+  rendererPatch, sameTrigger, triggerLabel, triggersClash,
 } from '../../src/shared/settings';
 
 describe('normalizeSettings', () => {
@@ -173,6 +173,15 @@ describe('emote settings', () => {
   it('custom emote key equal to the pause key turns off', () => {
     expect(normalizeSettings({ emoteTrigger: { vk: 0x50 } }).emoteTrigger).toBe('off');
     expect(normalizeSettings({ emoteTrigger: { vk: 0x50 }, toggleHotkey: { mods: MOD.ctrl, vk: 0x4b } }).emoteTrigger).toEqual({ vk: 0x50 });
+  });
+
+  it('linux has no caps lock or custom emote key', () => {
+    expect(normalizeSettings({ emoteTrigger: 'capslock' }, 'linux').emoteTrigger).toBe('ctrl');
+    expect(normalizeSettings({ emoteTrigger: { vk: 0x56 } }, 'linux').emoteTrigger).toBe('ctrl');
+    expect(normalizeSettings({ emoteTrigger: 'mouse5' }, 'linux').emoteTrigger).toBe('mouse5');
+    expect(normalizeSettings({ emoteTrigger: 'off' }, 'linux').emoteTrigger).toBe('off');
+    // the fallback meets a Ctrl ping trigger, so the emote key turns off
+    expect(normalizeSettings({ trigger: 'ctrl', emoteTrigger: { vk: 0x56 } }, 'linux').emoteTrigger).toBe('off');
   });
 
   it('mac has no caps lock emote key', () => {
@@ -383,6 +392,34 @@ describe('helpers', () => {
     expect(normalizeSettings({ trigger: 'capslock' }, 'mac').trigger).toBe('alt');
     expect(mergeSettings(DEFAULT_SETTINGS, { trigger: 'capslock' }, 'mac').trigger).toBe('alt');
     expect(normalizeSettings({ trigger: 'win' }, 'mac').trigger).toBe('win');
+  });
+
+  it('labels triggers with Linux names on Linux', () => {
+    expect(triggerLabel('alt', 'en', 'linux')).toBe('Alt');
+    expect(triggerLabel('win', 'en', 'linux')).toBe('Super');
+    expect(triggerLabel('win', 'zh-CN', 'linux')).toBe('Super');
+    expect(triggerLabel('mouse4', 'zh-CN', 'linux')).toBe('鼠标侧键 4');
+  });
+
+  it('offers neither Caps Lock nor a custom key on Linux, and replaces stored ones with Alt', () => {
+    expect(keyboardTriggers('linux')).toEqual(['alt', 'ctrl', 'shift', 'win']);
+    expect(offersCustomTrigger('linux')).toBe(false);
+    expect(offersCustomTrigger('win')).toBe(true);
+    expect(offersCustomTrigger('mac')).toBe(true);
+    expect(normalizeSettings({ trigger: 'capslock' }, 'linux').trigger).toBe('alt');
+    expect(normalizeSettings({ trigger: { vk: 0x56 } }, 'linux').trigger).toBe('alt');
+    expect(mergeSettings(DEFAULT_SETTINGS, { trigger: { vk: 0x56 } }, 'linux').trigger).toBe('alt');
+    for (const trigger of ['alt', 'ctrl', 'shift', 'win', 'mouse4', 'mouse5'] as const) {
+      expect(normalizeSettings({ trigger, emoteTrigger: 'off' }, 'linux').trigger).toBe(trigger);
+    }
+    expect(normalizeSettings({ trigger: { vk: 0x56 } }, 'mac').trigger).toEqual({ vk: 0x56 });
+  });
+
+  it('judges a Linux patch with the keys Linux would keep', () => {
+    const current = normalizeSettings({ trigger: 'mouse4', emoteTrigger: 'off' });
+    // a custom ping key becomes Alt on Linux, which then meets an Alt emote key
+    expect(patchClashes(current, { trigger: { vk: 0x56 }, emoteTrigger: 'alt' }, 'linux')).toBe(true);
+    expect(patchClashes(current, { trigger: { vk: 0x56 }, emoteTrigger: 'alt' }, 'win')).toBe(false);
   });
 
   it('extracts overlay settings', () => {

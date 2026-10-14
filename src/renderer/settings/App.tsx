@@ -15,7 +15,7 @@ import { api } from './api';
 import { AboutSection } from './components/AboutSection';
 import { EmoteSection } from './components/EmoteSection';
 import { KeyCapture } from './components/KeyCapture';
-import { PermissionCard } from './components/PermissionCard';
+import { LinuxPermissionCard, PermissionCard } from './components/PermissionCard';
 import { RoomSection } from './components/RoomSection';
 import { SettingRow, SliderRow, SwitchRow } from './components/rows';
 import { StatusCard } from './components/StatusCard';
@@ -68,7 +68,7 @@ export function App() {
   const dark = useDarkMode();
   const { settings, status, update } = useAppState();
   useEffect(() => {
-    document.documentElement.dataset.platform = PLATFORM; // mac.css restyles the page for macOS
+    document.documentElement.dataset.platform = PLATFORM; // mac.css restyles the page for macOS; Linux's is opaque
   }, []);
   const theme = MAC ? (dark ? macDarkTheme : macLightTheme) : dark ? webDarkTheme : webLightTheme;
   return (
@@ -140,7 +140,11 @@ function SettingsPage({ settings: s, status, update }: { settings: Settings; sta
       </nav>
       <main className="content" ref={mainRef} onScroll={onScroll}>
         <h1 className="pageTitle">{t.pageTitle}</h1>
-        {status.helper === 'noAccess' ? <PermissionCard stale={status.staleAccess === true} /> : null}
+        {status.helper !== 'noAccess' ? null : PLATFORM === 'linux' ? (
+          <LinuxPermissionCard problem={status.accessProblem ?? 'input'} />
+        ) : (
+          <PermissionCard stale={status.staleAccess === true} />
+        )}
         <StatusCard settings={s} status={status} />
 
         <div className="section" id="trigger">{t.navTrigger}</div>
@@ -159,7 +163,7 @@ function SettingsPage({ settings: s, status, update }: { settings: Settings; sta
         <SwitchRow icon={<CursorClick24Regular />} title={t.clickPing(trigger)}
           description={t.clickPingDesc(trigger)}
           checked={s.clickPing} onChange={(v) => void update({ clickPing: v })} dim={off} />
-        {!MAC && ( // the macOS helper has no fullscreen probe yet
+        {PLATFORM === 'win' && ( // the macOS and Linux helpers have no fullscreen probe yet
           <SwitchRow icon={<Games24Regular />} title={t.gameCheck}
             description={t.gameCheckDesc}
             checked={s.gameCheck} onChange={(v) => void update({ gameCheck: v })} dim={off} />

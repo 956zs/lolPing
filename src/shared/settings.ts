@@ -19,9 +19,15 @@ export type TriggerKey = NamedTrigger | { vk: number };
 export type EmoteTriggerKey = TriggerKey | 'off';
 export const NAMED_TRIGGERS: readonly NamedTrigger[] = ['alt', 'ctrl', 'shift', 'win', 'capslock', 'mouse4', 'mouse5'];
 
-/** Keyboard triggers offered on each platform. macOS can't reliably stop Caps Lock from toggling, so it isn't offered. */
+/**
+ * Keyboard triggers offered on each platform. macOS can't reliably stop Caps Lock from toggling, and Linux only reads
+ * keyboards without holding keys back, so neither offers Caps Lock.
+ */
 export const keyboardTriggers = (platform: Platform): NamedTrigger[] =>
-  platform === 'mac' ? ['alt', 'ctrl', 'shift', 'win'] : ['alt', 'ctrl', 'shift', 'win', 'capslock'];
+  platform === 'win' ? ['alt', 'ctrl', 'shift', 'win', 'capslock'] : ['alt', 'ctrl', 'shift', 'win'];
+
+/** Linux can't swallow a key, so a custom key can't be a trigger there either. */
+export const offersCustomTrigger = (platform: Platform): boolean => platform !== 'linux';
 
 export interface Settings {
   version: 1;
@@ -141,9 +147,9 @@ function num(raw: unknown, key: NumKey): number {
 const bool = (raw: unknown, key: BoolKey): boolean => (typeof raw === 'boolean' ? raw : DEFAULT_SETTINGS[key]);
 
 function triggerKey(raw: unknown, platform: Platform, fallback: TriggerKey): TriggerKey {
-  if (platform === 'mac' && raw === 'capslock') return fallback;
+  if (platform !== 'win' && raw === 'capslock') return fallback;
   if (typeof raw === 'string' && (NAMED_TRIGGERS as readonly string[]).includes(raw)) return raw as NamedTrigger;
-  if (isObj(raw) && isVk(raw.vk)) return { vk: raw.vk };
+  if (isObj(raw) && isVk(raw.vk) && offersCustomTrigger(platform)) return { vk: raw.vk };
   return fallback;
 }
 
@@ -274,6 +280,7 @@ type KeyTrigger = Exclude<NamedTrigger, 'mouse4' | 'mouse5'>;
 const KEY_LABELS: Record<Platform, Record<KeyTrigger, string>> = {
   win: { alt: 'Alt', ctrl: 'Ctrl', shift: 'Shift', win: 'Win', capslock: 'Caps Lock' },
   mac: { alt: '⌥ Option', ctrl: '⌃ Control', shift: '⇧ Shift', win: '⌘ Command', capslock: '⇪ Caps Lock' },
+  linux: { alt: 'Alt', ctrl: 'Ctrl', shift: 'Shift', win: 'Super', capslock: 'Caps Lock' },
 };
 
 export function triggerLabel(t: TriggerKey, lang: Lang = 'en', platform: Platform = 'win'): string {

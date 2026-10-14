@@ -9,6 +9,16 @@ export const LANGUAGE_PREFS: readonly LanguagePref[] = ['auto', 'en', 'zh-CN'];
 /** Each language's name in itself, for the picker. */
 export const LANGUAGE_NAMES: Record<Lang, string> = { en: 'English', 'zh-CN': '简体中文' };
 
+/** One step of the Linux permission card. `command` is a shell command to copy, the same in every language. */
+export interface PermStep {
+  text: string;
+  command?: string;
+}
+
+const INPUT_GROUP_COMMAND = 'sudo usermod -aG input "$USER"';
+const UINPUT_RULE_COMMAND = 'echo \'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"\''
+  + ' | sudo tee /etc/udev/rules.d/60-lolping-uinput.rules\nsudo udevadm control --reload && sudo udevadm trigger';
+
 export function resolveLang(pref: LanguagePref, locale: string): Lang {
   if (pref !== 'auto') return pref;
   return /^zh/i.test(locale) ? 'zh-CN' : 'en';
@@ -135,6 +145,21 @@ const en = {
   ],
   permOpen: 'Open System Settings',
   permRetry: 'Try again',
+  // Linux input permission (settings window)
+  permLinuxTitle: 'lolPing needs access to the mouse and keyboard',
+  permLinuxSteps: [
+    { text: 'Add yourself to the input group, so lolPing can read the mouse and keyboard:', command: INPUT_GROUP_COMMAND },
+    {
+      text: 'Allow /dev/uinput, so lolPing can pass the mouse on. Some packages, such as ydotool and Sunshine, already do this:',
+      command: UINPUT_RULE_COMMAND,
+    },
+    { text: 'Log out and back in, then click Try again.' },
+  ] as PermStep[],
+  permHyprlandTitle: 'lolPing needs Hyprland',
+  permHyprlandSteps: [
+    'On Linux, lolPing only works in a Hyprland session for now.',
+    'Start lolPing from inside Hyprland, for example with exec-once or from a terminal there, then click Try again.',
+  ],
   // room (settings window)
   roomName: 'Your name',
   roomNameDesc: 'Shown under your pings on other people’s screens',
@@ -382,6 +407,17 @@ const zh: Strings = {
   ],
   permOpen: '打开系统设置',
   permRetry: '重试',
+  permLinuxTitle: 'lolPing 需要读取鼠标和键盘的权限',
+  permLinuxSteps: [
+    { text: '把自己加入 input 用户组，让 lolPing 能读取鼠标和键盘：', command: INPUT_GROUP_COMMAND },
+    { text: '允许使用 /dev/uinput，让 lolPing 能把鼠标输入传下去。ydotool、Sunshine 等软件包已经做过这一步：', command: UINPUT_RULE_COMMAND },
+    { text: '注销并重新登录，然后点击“重试”。' },
+  ],
+  permHyprlandTitle: 'lolPing 需要 Hyprland',
+  permHyprlandSteps: [
+    '目前在 Linux 上，lolPing 只能在 Hyprland 会话中使用。',
+    '请在 Hyprland 中启动 lolPing，例如通过 exec-once 或在 Hyprland 里的终端中运行，然后点击“重试”。',
+  ],
   roomName: '你的名字',
   roomNameDesc: '显示在你的信号下方，其他人可以看到',
   roomColor: '名字颜色',
@@ -548,9 +584,56 @@ const MAC: Record<Lang, Partial<Strings>> = {
   },
 };
 
+/** Wording that differs on Linux (Hyprland): Super, login items through uwsm, the file manager, Linux limitations. */
+const LINUX: Record<Lang, Partial<Strings>> = {
+  en: {
+    hintNeedModifier: 'Add Ctrl, Alt or Super',
+    launchAtStartup: 'Open at login',
+    launchAtStartupDesc: 'Starts hidden in the tray. Hyprland only opens login apps when the session starts through uwsm; otherwise start lolPing with exec-once, as the README shows',
+    languageDesc: 'Follow the system, or pick one',
+    languageAuto: 'Follow the system',
+    openSettingsFolder: 'Show in file manager',
+    statusNoAccess: 'The input helper can’t start',
+    statusNoAccessHint: 'Follow the steps above, then click Try again.',
+    trayTipNoAccess: 'lolPing: the input helper can’t start',
+    roomNetworkHint: 'If a firewall is on, allow UDP port 47474, so friends on your network can see your pings.',
+    limitations: [
+      'Only Hyprland is supported. Other Wayland compositors and X11 sessions don’t work yet.',
+      'Touchpads are left alone, so a touchpad drag doesn’t open the wheel. Use a mouse.',
+      'Keys aren’t held back: the pause shortcut and Esc also reach the app in front, and Caps Lock or a custom key can’t be the trigger.',
+      'The overlay may not show over fullscreen windows.',
+      'The input group and /dev/uinput let a program read and send all input. That is the access lolPing needs on every platform.',
+      'Single-window screen sharing doesn’t include the pings; share the entire screen.',
+      'While lolPing is on, Ctrl + drag (the default emote key) opens the emote wheel instead of its usual action. Change the emote key or turn it off in Settings → Emotes.',
+    ],
+  },
+  'zh-CN': {
+    hintNeedModifier: '请加上 Ctrl、Alt 或 Super',
+    launchAtStartup: '登录时打开',
+    launchAtStartupDesc: '启动后隐藏在托盘中。只有通过 uwsm 启动会话时，Hyprland 才会打开登录项；否则请按 README 的说明用 exec-once 启动 lolPing',
+    languageDesc: '跟随系统，或手动选择',
+    languageAuto: '跟随系统',
+    openSettingsFolder: '在文件管理器中显示',
+    statusNoAccess: '输入助手无法启动',
+    statusNoAccessHint: '请按上方的步骤操作，然后点击“重试”。',
+    trayTipNoAccess: 'lolPing：输入助手无法启动',
+    roomNetworkHint: '如果开启了防火墙，请允许 UDP 端口 47474，这样同一网络中的朋友才能看到你的信号。',
+    limitations: [
+      '目前只支持 Hyprland，其他 Wayland 合成器和 X11 会话暂不可用。',
+      '触摸板不受 lolPing 接管，所以用触摸板拖动不会打开轮盘。请使用鼠标。',
+      '按键不会被拦下：暂停快捷键和 Esc 也会传给前台程序，Caps Lock 和自定义按键也不能用作触发键。',
+      '信号层可能无法显示在全屏窗口之上。',
+      'input 用户组和 /dev/uinput 让程序可以读取和发送所有输入。lolPing 在每个平台上需要的都是这种权限。',
+      '只共享单个窗口时看不到信号，请共享整个屏幕。',
+      'lolPing 开启时，Ctrl + 拖动（默认的表情键）会打开表情轮盘，而不会执行它原本的操作。可在“设置 → 表情”中更换表情键或将其关闭。',
+    ],
+  },
+};
+
 const TABLES: Record<Platform, Record<Lang, Strings>> = {
   win: { en, 'zh-CN': zh },
   mac: { en: { ...en, ...MAC.en }, 'zh-CN': { ...zh, ...MAC['zh-CN'] } },
+  linux: { en: { ...en, ...LINUX.en }, 'zh-CN': { ...zh, ...LINUX['zh-CN'] } },
 };
 
 /** The same object for the same arguments, so it can be a React dependency. */

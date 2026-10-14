@@ -44,6 +44,43 @@ describe('language', () => {
     expect(strings('en', 'mac')).toBe(en); // stable identity: the settings page uses it as a React dependency
   });
 
+  it('has the same Linux wording in both languages', () => {
+    const en = strings('en', 'linux');
+    const zh = strings('zh-CN', 'linux');
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort());
+    expect(zh.limitations).toHaveLength(en.limitations.length);
+    expect(zh.permLinuxSteps).toHaveLength(en.permLinuxSteps.length);
+    expect(zh.permHyprlandSteps).toHaveLength(en.permHyprlandSteps.length);
+    expect(strings('en', 'linux')).toBe(en); // stable identity: the settings page uses it as a React dependency
+  });
+
+  it('words Linux as specified: Super, open at login with uwsm or exec-once, the file manager', () => {
+    for (const lang of ['en', 'zh-CN'] as const) {
+      const t = strings(lang, 'linux');
+      expect(t.hintNeedModifier).toContain('Super');
+      expect(t.launchAtStartupDesc).toContain('uwsm');
+      expect(t.launchAtStartupDesc).toContain('exec-once');
+      expect(t.limitations.join(' ')).toContain('Hyprland');
+      expect(t.limitations).not.toEqual(strings(lang).limitations);
+      expect(t.openSettingsFolder).not.toBe(strings(lang).openSettingsFolder);
+    }
+    expect(strings('en', 'linux').launchAtStartup).toBe('Open at login');
+    expect(strings('en', 'linux').openSettingsFolder).toBe('Show in file manager');
+    expect(strings('en', 'linux').languageAuto).toBe('Follow the system');
+    expect(strings('en').launchAtStartup).toBe('Launch at Windows startup');
+  });
+
+  it('gives the Linux permission card the same commands in both languages', () => {
+    const commands = (lang: 'en' | 'zh-CN') => strings(lang, 'linux').permLinuxSteps.map((s) => s.command);
+    expect(commands('zh-CN')).toEqual(commands('en'));
+    expect(commands('en')[0]).toBe('sudo usermod -aG input "$USER"');
+    expect(commands('en')[1]).toBe(
+      'echo \'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"\''
+      + ' | sudo tee /etc/udev/rules.d/60-lolping-uinput.rules\nsudo udevadm control --reload && sudo udevadm trigger',
+    );
+    expect(strings('en', 'linux').permHyprlandTitle).toBe('lolPing needs Hyprland');
+  });
+
   it('words the update checker as specified, with a menu bar toast on a Mac', () => {
     const en = strings('en');
     expect(en.updateAvailable('0.5.1')).toBe('lolPing 0.5.1 is available');

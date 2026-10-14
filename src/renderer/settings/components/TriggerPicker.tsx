@@ -2,16 +2,17 @@ import { Dropdown, Option, OptionGroup } from '@fluentui/react-components';
 import { useState } from 'react';
 import { UNSAFE_TRIGGER_VKS, vkLabel } from '../../../shared/keys';
 import {
-  keyboardTriggers, sameTrigger, triggerLabel, triggerVk, type EmoteTriggerKey, type NamedTrigger,
+  keyboardTriggers, offersCustomTrigger, sameTrigger, triggerLabel, triggerVk, type EmoteTriggerKey, type NamedTrigger,
 } from '../../../shared/settings';
 import { api } from '../api';
 import { useText } from '../text';
 import { KeyCapture } from './KeyCapture';
 
 const KEYBOARD: NamedTrigger[] = keyboardTriggers(api.platform);
+const CUSTOM = offersCustomTrigger(api.platform);
 
 /**
- * Fluent Dropdown (never a native <select>) with Keyboard / Mouse groups and a custom key option.
+ * Fluent Dropdown (never a native <select>) with Keyboard / Mouse groups and a custom key option (not on Linux).
  * `offOption` adds an Off choice. `blocked` is the other trigger's key: it can't be picked here, so its option is disabled
  * and the custom-key capture refuses it.
  */
@@ -69,7 +70,7 @@ export function TriggerPicker({ value, onChange, offOption, blocked }: {
           <Option value="mouse4" text={t.mouse4} disabled={isBlocked('mouse4')}>{t.mouse4}<span className="desc inline">{t.mouseBack}</span></Option>
           <Option value="mouse5" text={t.mouse5} disabled={isBlocked('mouse5')}>{t.mouse5}<span className="desc inline">{t.mouseForward}</span></Option>
         </OptionGroup>
-        <Option value="custom" text={t.customKeyMenu}>{t.customKeyMenu}</Option>
+        {CUSTOM ? <Option value="custom" text={t.customKeyMenu}>{t.customKeyMenu}</Option> : null}
       </Dropdown>
     </>
   );

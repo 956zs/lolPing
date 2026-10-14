@@ -1,7 +1,7 @@
 import type { EmoteArt, EmoteFile, EmoteRef, ImportResult } from './emotes';
 import type { PingId } from './pings';
 import type { Platform } from './platform';
-import type { HelperStatus, WheelKind } from './protocol';
+import type { AccessProblem, HelperStatus, WheelKind } from './protocol';
 import type { JoinResult, RoomState } from './room';
 import type { OverlaySettings, Settings } from './settings';
 import type { UpdateState } from './update';
@@ -55,6 +55,8 @@ export interface AppStatus {
    * left by an update (ad-hoc signatures change every build): it has to be removed and added again.
    */
   staleAccess?: boolean;
+  /** Linux only, while `helper` is 'noAccess': whether the input devices or a Hyprland session is missing. */
+  accessProblem?: AccessProblem;
 }
 
 export interface About {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { configCommand, parseHelperLine, serializeCommand } from '../../src/shared/protocol';
+import { accessProblemOf, configCommand, parseHelperLine, serializeCommand } from '../../src/shared/protocol';
 import { DEFAULT_SETTINGS } from '../../src/shared/settings';
 
 describe('parseHelperLine', () => {
@@ -61,5 +61,16 @@ describe('commands', () => {
     const line = serializeCommand({ type: 'suspend', on: true });
     expect(line).toBe('{"type":"suspend","on":true}\n');
     expect(line.indexOf('\n')).toBe(line.length - 1);
+  });
+});
+
+describe('accessProblemOf', () => {
+  it('reads the Linux helper\'s error code', () => {
+    expect(accessProblemOf('noHyprland')).toBe('hyprland');
+    expect(accessProblemOf('noAccess')).toBe('input');
+  });
+
+  it('takes a missing or unknown code for missing input access, the usual reason', () => {
+    for (const code of [undefined, '', 'nohyprland', 'boom']) expect(accessProblemOf(code)).toBe('input');
   });
 });

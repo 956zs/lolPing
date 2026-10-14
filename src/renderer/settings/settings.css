@@ -89,6 +89,11 @@ main.content { overflow: auto; padding: 4px 28px 28px 20px; }
 .card.permission .lbl { padding: 12px 0; }
 .card.permission ol { margin: 6px 0 12px; padding-left: 18px; }
 .card.permission .actions { display: flex; gap: 8px; }
+.card.permission pre.command { margin: 4px 0 8px; padding: 6px 8px; border-radius: 4px; font: 12px/16px "Cascadia Mono", Consolas, monospace;
+  background: var(--colorNeutralBackground3); color: var(--colorNeutralForeground1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+/* Linux has no Mica: the window is opaque, in the colours Mica has on Windows 11 (settingsWindow.ts uses the same). */
+html[data-platform="linux"] { background: #f3f3f3; }
+@media (prefers-color-scheme: dark) { html[data-platform="linux"] { background: #202020; } }
 /* Room */
 .swatches { display: flex; gap: 6px; }
 .swatch { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent; outline-offset: 1px; cursor: pointer; }

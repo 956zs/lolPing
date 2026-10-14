@@ -5,7 +5,8 @@ export type WheelKind = 'ping' | 'emote';
 
 /**
  * Messages the hook helper writes to stdout, one JSON object per line.
- * Coordinates are physical pixels on Windows and global points (Electron DIPs) on macOS.
+ * Coordinates are physical pixels on Windows, global points (Electron DIPs) on macOS and Hyprland's layout coordinates
+ * (also DIPs) on Linux.
  */
 export type HelperEvent =
   | { type: 'ready'; version: number }
@@ -15,11 +16,23 @@ export type HelperEvent =
   | { type: 'error'; message: string; code?: string }
   | { type: 'sim'; swallow: boolean; inject: string };
 
-/** `noAccess`: macOS hasn't given lolPing Accessibility access, so the helper can't run. */
+/**
+ * `noAccess`: the helper can't run without something only the user can give it: Accessibility access on macOS, or on
+ * Linux the input devices or a Hyprland session.
+ */
 export type HelperStatus = 'starting' | 'running' | 'failed' | 'noAccess';
 
-/** The helper's exit code when it can't create its event tap (macOS Accessibility access missing). */
+/**
+ * The helper's exit code when it can't read input: its event tap fails (macOS Accessibility access missing), or on Linux
+ * it can't open the input devices or reach Hyprland.
+ */
 export const HELPER_EXIT_NO_ACCESS = 3;
+
+/** Linux: what a helper that exited with HELPER_EXIT_NO_ACCESS is missing, the input devices or a Hyprland session. */
+export type AccessProblem = 'input' | 'hyprland';
+
+/** Reads the `code` of the error the Linux helper prints before it exits for lack of access. */
+export const accessProblemOf = (code: string | undefined): AccessProblem => (code === 'noHyprland' ? 'hyprland' : 'input');
 
 type PointType = 'wheelOpen' | 'wheelMove' | 'wheelRelease' | 'click';
 const POINT_TYPES = new Set<string>(['wheelOpen', 'wheelMove', 'wheelRelease', 'click']);

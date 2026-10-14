@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type { SettingsApi } from '../shared/ipc';
+import { platformOf } from '../shared/platform';
 import { SETTINGS_CH } from '../shared/settingsChannels';
 
 function subscribe<T>(channel: string, cb: (v: T) => void): () => void {
@@ -9,8 +10,8 @@ function subscribe<T>(channel: string, cb: (v: T) => void): () => void {
 }
 
 const api: SettingsApi = {
-  // Inlined rather than imported: a sandboxed preload can't require a shared chunk.
-  platform: process.platform === 'darwin' ? 'mac' : 'win',
+  // Only this preload imports platform.ts, so it is bundled in: a sandboxed preload can't require a shared chunk.
+  platform: platformOf(process.platform),
   getSettings: () => ipcRenderer.invoke(SETTINGS_CH.get),
   setSettings: (patch) => ipcRenderer.invoke(SETTINGS_CH.set, patch),
   onSettings: (cb) => subscribe(SETTINGS_CH.changed, cb),
