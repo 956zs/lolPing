@@ -7,6 +7,7 @@ type Listener = (payload: never) => void;
 const listeners = new Map<OverlayChannel, Listener[]>();
 
 const api: OverlayApi = {
+  platform: 'win', // the demo page sounds like the Windows app
   on(channel, cb) {
     listeners.set(channel, [...(listeners.get(channel) ?? []), cb as Listener]);
   },

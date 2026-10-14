@@ -11,7 +11,7 @@ import type { WheelKind } from '../../shared/protocol';
 import { DEFAULT_SETTINGS, overlaySettings, type OverlaySettings } from '../../shared/settings';
 import { EmoteStage } from './emoteFx';
 import { spawnPing } from './pingFx';
-import { SoundBank } from './soundBank';
+import { IDLE_SUSPEND_MS, SoundBank } from './soundBank';
 import { showToast } from './toast';
 import { Wheel, type WheelItem } from './wheel';
 
@@ -27,7 +27,8 @@ const emoteLayer = document.createElement('div');
 emoteLayer.id = 'emotes';
 pingLayer.after(emoteLayer);
 
-const sounds = new SoundBank();
+// Linux only for now, where it was measured: a resume takes about 10 ms, and an idle context cost 2-3% CPU.
+const sounds = new SoundBank(window.overlay.platform === 'linux' ? IDLE_SUSPEND_MS : null);
 const stage = new EmoteStage(emoteLayer);
 let settings: OverlaySettings = overlaySettings(DEFAULT_SETTINGS);
 const [fallbackPing] = pingsFor([DEFAULT_CLICK_PING]);
