@@ -1,19 +1,33 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { HyprMonitor, HyprRule } from '../../src/main/hyprRules';
 import type { EmoteArt } from '../../src/shared/emotes';
 import { OVERLAY_EMOTED, OVERLAY_PINGED } from '../../src/shared/ipc';
 import { DEFAULT_SETTINGS, overlaySettings } from '../../src/shared/settings';
 
 type Rect = { x: number; y: number; width: number; height: number };
+type FakeDisplay = { id: number; bounds: Rect; scaleFactor: number };
+
+const twoDisplays = (): FakeDisplay[] => [
+  { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
+  { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 1024 }, scaleFactor: 1 },
+];
 
 const h = vi.hoisted(() => ({
   windows: [] as Array<{
     x: number;
     bounds: Rect;
-    emit: (event: string) => boolean;
+    title?: string;
+    destroyed: boolean;
+    emit: (event: string, ...args: unknown[]) => boolean;
     webContents: { send: ReturnType<typeof vi.fn> };
   }>,
   handlers: new Map<string, (event: unknown, raw: unknown) => void>(),
   isMac: false,
+  isLinux: false,
+  displays: [] as FakeDisplay[],
+  /** What happened, in order: rules added and windows made. */
+  log: [] as string[],
 }));
 
 vi.mock('electron', async () => {
@@ -24,12 +38,16 @@ vi.mock('electron', async () => {
     }
     x: number;
     bounds: Rect;
+    title?: string;
+    destroyed = false;
     webContents = Object.assign(new Emitter(), { send: vi.fn() });
-    constructor(opts: Rect) {
+    constructor(opts: Rect & { title?: string }) {
       super();
       this.x = opts.x;
       this.bounds = { x: opts.x, y: opts.y, width: opts.width, height: opts.height };
+      this.title = opts.title;
       h.windows.push(this);
+      h.log.push(`window ${opts.title ?? ''}`);
     }
     setIgnoreMouseEvents(): void {}
     setAlwaysOnTop(): void {}
@@ -39,17 +57,15 @@ vi.mock('electron', async () => {
     }
     showInactive(): void {}
     isDestroyed(): boolean {
-      return false;
+      return this.destroyed;
     }
-    destroy(): void {}
+    destroy(): void {
+      this.destroyed = true;
+    }
   }
-  const displays = [
-    { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
-    { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 1024 }, scaleFactor: 1 },
-  ];
   const screen = Object.assign(new Emitter(), {
-    getAllDisplays: () => displays,
-    getPrimaryDisplay: () => displays[0],
+    getAllDisplays: () => h.displays,
+    getPrimaryDisplay: () => h.displays[0],
     dipToScreenRect: (_win: unknown, r: unknown) => r,
   });
   screen.setMaxListeners(0); // every test starts a manager on this one fake screen
@@ -60,6 +76,9 @@ vi.mock('electron', async () => {
 vi.mock('../../src/main/paths', () => ({
   get IS_MAC() {
     return h.isMac;
+  },
+  get IS_LINUX() {
+    return h.isLinux;
   },
   loadPage: () => Promise.resolve(),
   preloadPath: () => 'preload.js',
@@ -78,6 +97,9 @@ beforeEach(async () => {
   h.windows.length = 0;
   h.handlers.clear();
   h.isMac = false;
+  h.isLinux = false;
+  h.displays = twoDisplays();
+  h.log.length = 0;
   vi.resetModules();
   const { OverlayManager } = await import('../../src/main/overlayManager');
   resolveArt = vi.fn(art);
@@ -213,5 +235,144 @@ describe('OverlayManager window bounds', () => {
       { x: 0, y: 0, width: 1920, height: 1080 },
       { x: 1920, y: 0, width: 1280, height: 1024 },
     ]);
+  });
+});
+
+/** A stand-in for Hyprland: its monitors, and whether adding a rule works. */
+class FakeHost extends EventEmitter {
+  monitorList: HyprMonitor[] = [
+    { name: 'DP-1', rect: { x: 0, y: 0, width: 1920, height: 1080 } },
+    { name: 'HDMI-A-1', rect: { x: 1920, y: 0, width: 1280, height: 1024 } },
+  ];
+  refuse = new Set<string>();
+  monitors(): Promise<HyprMonitor[]> {
+    return Promise.resolve(this.monitorList);
+  }
+  addRules(rules: readonly HyprRule[]): Promise<boolean> {
+    for (const r of rules) h.log.push(`rule ${r.name}`);
+    return Promise.resolve(rules.every((r) => !this.refuse.has(r.name)));
+  }
+}
+
+describe('OverlayManager on Hyprland', () => {
+  const live = () => h.windows.filter((w) => !w.destroyed);
+  /** Settles the manager's queue of Hyprland work, for checks that nothing (more) happens. */
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  const started: Manager[] = [];
+  // Every manager listens to the one fake screen: one left from an earlier test would make windows of its own.
+  afterEach(() => {
+    for (const m of started) m.destroy();
+    started.length = 0;
+  });
+
+  async function startLinux(host: FakeHost | null): Promise<Manager> {
+    h.windows.length = 0;
+    h.log.length = 0;
+    h.isLinux = true;
+    vi.resetModules();
+    const { OverlayManager } = await import('../../src/main/overlayManager');
+    const m = new OverlayManager(overlaySettings(DEFAULT_SETTINGS), resolveArt, host);
+    started.push(m);
+    m.start();
+    return m;
+  }
+
+  it('adds each monitor\'s rule before making its window, and names the window after the monitor', async () => {
+    await startLinux(new FakeHost());
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    expect(h.log).toEqual([
+      'rule lolping-overlay-DP-1', 'window lolPing overlay DP-1', 'rule lolping-overlay-HDMI-A-1', 'window lolPing overlay HDMI-A-1',
+    ]);
+  });
+
+  it('keeps the title the rule matches when the page sets its own', async () => {
+    await startLinux(new FakeHost());
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    const event = { preventDefault: vi.fn() };
+    h.windows[0].emit('page-title-updated', event, 'lolPing overlay');
+    expect(event.preventDefault).toHaveBeenCalled();
+  });
+
+  it('covers the whole display and takes helper points as DIPs, whatever the scale', async () => {
+    h.displays[1].scaleFactor = 2;
+    const m = await startLinux(new FakeHost());
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    for (const w of h.windows) w.emit('ready-to-show');
+    expect(h.windows.map((w) => w.bounds)).toEqual([h.displays[0].bounds, h.displays[1].bounds]);
+    m.handle({ type: 'click', x: 1920 + 300, y: 400, wheel: 'ping' });
+    expect(sent(1)).toEqual([['ping:spawn', { id: DEFAULT_SETTINGS.clickPingId, x: 300, y: 400 }]]);
+  });
+
+  it('makes a new window for a display whose rect changed, and leaves the others alone', async () => {
+    const host = new FakeHost();
+    await startLinux(host);
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    const { screen } = await import('electron');
+    h.displays[1] = { ...h.displays[1], bounds: { x: 1920, y: 0, width: 1440, height: 900 } };
+    host.monitorList[1] = { name: 'HDMI-A-1', rect: { x: 1920, y: 0, width: 1440, height: 900 } };
+    screen.emit('display-metrics-changed');
+    await vi.waitFor(() => expect(h.windows).toHaveLength(3));
+    expect(h.windows[0].destroyed).toBe(false);
+    expect(h.windows[1].destroyed).toBe(true);
+    expect(h.windows[2]).toMatchObject({ title: 'lolPing overlay HDMI-A-1', bounds: { x: 1920, y: 0, width: 1440, height: 900 } });
+  });
+
+  it('keeps every window when the displays report a change that moves nothing', async () => {
+    await startLinux(new FakeHost());
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    const { screen } = await import('electron');
+    screen.emit('display-metrics-changed');
+    await settle();
+    expect(h.windows).toHaveLength(2);
+    expect(live()).toHaveLength(2);
+  });
+
+  it('remakes every window with its rule added again after a config reload', async () => {
+    const host = new FakeHost();
+    await startLinux(host);
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    h.log.length = 0;
+    host.emit('reloaded');
+    await vi.waitFor(() => expect(h.windows).toHaveLength(4));
+    expect(h.windows.slice(0, 2).every((w) => w.destroyed)).toBe(true);
+    expect(h.log).toEqual([
+      'rule lolping-overlay-DP-1', 'window lolPing overlay DP-1', 'rule lolping-overlay-HDMI-A-1', 'window lolPing overlay HDMI-A-1',
+    ]);
+  });
+
+  it('makes a window for a monitor that Hyprland reports later', async () => {
+    const host = new FakeHost();
+    const second = host.monitorList[1];
+    host.monitorList = [host.monitorList[0]];
+    await startLinux(host);
+    await vi.waitFor(() => expect(live()).toHaveLength(1));
+    host.monitorList.push(second);
+    host.emit('monitors');
+    await vi.waitFor(() => expect(live()).toHaveLength(2));
+    expect(h.windows[1].title).toBe('lolPing overlay HDMI-A-1');
+  });
+
+  it('makes no window for a display without a Hyprland monitor or whose rule could not be added', async () => {
+    const host = new FakeHost();
+    host.refuse.add('lolping-overlay-HDMI-A-1');
+    host.monitorList.push({ name: 'DP-9', rect: { x: 9000, y: 0, width: 800, height: 600 } }); // no display there
+    await startLinux(host);
+    await vi.waitFor(() => expect(h.log).toContain('rule lolping-overlay-HDMI-A-1'));
+    await settle();
+    expect(live().map((w) => w.title)).toEqual(['lolPing overlay DP-1']);
+  });
+
+  it('makes no windows without Hyprland', async () => {
+    await startLinux(null);
+    await settle();
+    expect(h.windows).toEqual([]);
+  });
+
+  it('makes no window once it has been destroyed', async () => {
+    const m = await startLinux(new FakeHost());
+    m.destroy();
+    await settle();
+    expect(live()).toEqual([]);
   });
 });
