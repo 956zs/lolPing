@@ -245,12 +245,14 @@ class FakeHost extends EventEmitter {
     { name: 'HDMI-A-1', rect: { x: 1920, y: 0, width: 1280, height: 1024 } },
   ];
   refuse = new Set<string>();
+  /** hyprctl fails: no monitors, and no rule is added. */
+  down = false;
   monitors(): Promise<HyprMonitor[]> {
-    return Promise.resolve(this.monitorList);
+    return Promise.resolve(this.down ? [] : this.monitorList);
   }
   addRules(rules: readonly HyprRule[]): Promise<boolean> {
     for (const r of rules) h.log.push(`rule ${r.name}`);
-    return Promise.resolve(rules.every((r) => !this.refuse.has(r.name)));
+    return Promise.resolve(!this.down && rules.every((r) => !this.refuse.has(r.name)));
   }
 }
 
@@ -361,6 +363,112 @@ describe('OverlayManager on Hyprland', () => {
     await vi.waitFor(() => expect(h.log).toContain('rule lolping-overlay-HDMI-A-1'));
     await settle();
     expect(live().map((w) => w.title)).toEqual(['lolPing overlay DP-1']);
+  });
+
+  describe('when Hyprland fails', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); // settle() still runs on setImmediate
+    });
+    afterEach(() => {
+      for (const m of started) m.destroy();
+      started.length = 0;
+      vi.useRealTimers();
+    });
+
+    /** Display 2 becomes 1440 × 900, on Electron's side and on Hyprland's. */
+    async function resizeSecond(host: FakeHost): Promise<void> {
+      const { screen } = await import('electron');
+      h.displays[1] = { ...h.displays[1], bounds: { x: 1920, y: 0, width: 1440, height: 900 } };
+      host.monitorList[1] = { name: 'HDMI-A-1', rect: { x: 1920, y: 0, width: 1440, height: 900 } };
+      screen.emit('display-metrics-changed');
+      await settle();
+    }
+
+    const advance = async (ms: number): Promise<void> => {
+      await vi.advanceTimersByTimeAsync(ms);
+      await settle();
+    };
+
+    it('keeps the overlays it has when Hyprland doesn\'t answer, and replaces them once it does', async () => {
+      const host = new FakeHost();
+      await startLinux(host);
+      await settle();
+      expect(live()).toHaveLength(2);
+      host.down = true;
+      await resizeSecond(host);
+      expect(h.windows).toHaveLength(2);
+      expect(live()).toHaveLength(2);
+      host.down = false;
+      await advance(1000);
+      expect(h.windows).toHaveLength(3);
+      expect(h.windows[1].destroyed).toBe(true);
+      expect(h.windows[2]).toMatchObject({ destroyed: false, title: 'lolPing overlay HDMI-A-1', bounds: { width: 1440, height: 900 } });
+    });
+
+    it('keeps the old window until the rule for its replacement is in', async () => {
+      const host = new FakeHost();
+      await startLinux(host);
+      await settle();
+      host.refuse.add('lolping-overlay-HDMI-A-1');
+      await resizeSecond(host);
+      expect(live().map((w) => w.title)).toEqual(['lolPing overlay DP-1', 'lolPing overlay HDMI-A-1']);
+      expect(h.windows).toHaveLength(2);
+      host.refuse.clear();
+      await advance(1000);
+      expect(h.windows[1].destroyed).toBe(true);
+      expect(live().map((w) => w.bounds.width)).toEqual([1920, 1440]);
+    });
+
+    it('keeps the old windows when a config reload\'s rules can\'t be added, and remakes them later', async () => {
+      const host = new FakeHost();
+      await startLinux(host);
+      await settle();
+      host.down = true;
+      host.emit('reloaded');
+      await settle();
+      expect(live()).toHaveLength(2);
+      expect(h.windows).toHaveLength(2);
+      host.down = false;
+      await advance(1000);
+      expect(h.windows).toHaveLength(4);
+      expect(live()).toEqual(h.windows.slice(2));
+    });
+
+    it('tries again after 1 s, 2 s and then every 5 s until every display has an overlay', async () => {
+      const host = new FakeHost();
+      host.refuse.add('lolping-overlay-HDMI-A-1');
+      await startLinux(host);
+      await settle();
+      const tries = () => h.log.filter((l) => l === 'rule lolping-overlay-HDMI-A-1').length;
+      expect(tries()).toBe(1);
+      await advance(999);
+      expect(tries()).toBe(1);
+      await advance(1);
+      expect(tries()).toBe(2);
+      await advance(2000);
+      expect(tries()).toBe(3);
+      await advance(5000);
+      expect(tries()).toBe(4);
+      await advance(5000);
+      expect(tries()).toBe(5);
+      host.refuse.clear();
+      await advance(5000);
+      expect(tries()).toBe(6);
+      expect(live().map((w) => w.title)).toEqual(['lolPing overlay DP-1', 'lolPing overlay HDMI-A-1']);
+      await advance(60_000);
+      expect(tries()).toBe(6);
+    });
+
+    it('stops trying once destroyed', async () => {
+      const host = new FakeHost();
+      host.down = true;
+      const m = await startLinux(host);
+      await settle();
+      m.destroy();
+      host.down = false;
+      await advance(60_000);
+      expect(h.windows).toEqual([]);
+    });
   });
 
   it('makes no windows without Hyprland', async () => {

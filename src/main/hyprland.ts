@@ -20,6 +20,60 @@ const OWN_RELOAD_MS = 1000;
 /** After this many of those in a row, adding the rules again is a loop, so lolPing stops doing it. */
 const MAX_OWN_RELOADS = 3;
 
+/** Waits between tries after Hyprland didn't answer: 1 s, 2 s, then every 5 s. */
+export const RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 5000];
+
+/**
+ * Runs `attempt` until it succeeds. A failure schedules the next try after a growing delay (the last one repeats); a
+ * success drops a try still waiting and starts the delays over. Nothing runs after stop().
+ */
+export class Retry {
+  private timer: NodeJS.Timeout | null = null;
+  private failures = 0;
+  private stopped = false;
+
+  constructor(
+    private readonly attempt: () => Promise<boolean>,
+    private readonly delays: readonly number[] = RETRY_DELAYS_MS,
+  ) {}
+
+  /** Tries now, in place of a try that is waiting. Resolves with whether it worked. */
+  async run(): Promise<boolean> {
+    if (this.stopped) return false;
+    this.cancel();
+    let ok = false;
+    try {
+      ok = await this.attempt();
+    } catch {
+      ok = false;
+    }
+    if (this.stopped) return ok;
+    if (ok) {
+      this.cancel();
+      this.failures = 0;
+    } else if (!this.timer) {
+      const delays = this.delays.length > 0 ? this.delays : RETRY_DELAYS_MS;
+      const delay = delays[Math.min(this.failures, delays.length - 1)];
+      this.failures += 1;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        void this.run();
+      }, delay);
+    }
+    return ok;
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.cancel();
+  }
+
+  private cancel(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
 export interface HyprlandOptions {
   /** From hyprSocketDir. */
   socketDir: string;

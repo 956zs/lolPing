@@ -9,6 +9,7 @@ import type { HelperEvent, WheelKind } from '../shared/protocol';
 import type { OverlaySettings } from '../shared/settings';
 import { physicalToLocal, type DisplayMap } from './coords';
 import { numberDisplays, type NumberedDisplay } from './displayNumbers';
+import { Retry } from './hyprland';
 import { matchMonitors, overlayRule, overlayTitle, type HyprMonitor, type HyprRule } from './hyprRules';
 import { IS_LINUX, IS_MAC, loadPage, preloadPath } from './paths';
 
@@ -59,7 +60,11 @@ export class OverlayManager extends EventEmitter {
   private wheelKind: WheelKind = 'ping';
   /** Linux: the monitor and rect each window was made for. Wayland can't move or resize windows: a change remakes it. */
   private readonly shapes = new Map<number, string>();
-  private hyprQueue: Promise<void> = Promise.resolve();
+  private hyprQueue: Promise<unknown> = Promise.resolve();
+  /** Linux: the next placement remakes every window, because a config reload dropped the rules they were made with. */
+  private remakeAll = false;
+  /** Linux: places the windows again, a little later each time, until every display has one. */
+  private readonly placement = new Retry(() => this.queuePlacement());
   private closed = false;
 
   /**
@@ -99,7 +104,10 @@ export class OverlayManager extends EventEmitter {
     screen.on('display-removed', () => this.rebuild());
     screen.on('display-metrics-changed', () => this.rebuild());
     this.hypr?.on('monitors', () => this.rebuild());
-    this.hypr?.on('reloaded', () => this.rebuild(true)); // remade with the rules added again
+    this.hypr?.on('reloaded', () => {
+      this.remakeAll = true;
+      this.rebuild();
+    });
   }
 
   updateSettings(s: OverlaySettings): void {
@@ -181,6 +189,7 @@ export class OverlayManager extends EventEmitter {
 
   destroy(): void {
     this.closed = true;
+    this.placement.stop();
     for (const w of this.windows.values()) if (!w.isDestroyed()) w.destroy();
     this.windows.clear();
   }
@@ -202,8 +211,7 @@ export class OverlayManager extends EventEmitter {
     for (const id of this.windows.keys()) if (id !== displayId) this.send(id, 'emote:clear', { owner });
   }
 
-  /** `fresh` remakes every window (Linux, after the rules were added again). */
-  private rebuild(fresh = false): void {
+  private rebuild(): void {
     this.cancelWheel();
     const displays = screen.getAllDisplays();
     // The macOS and Linux helpers already report points in Electron's DIP space; dipToScreenRect only exists on Windows.
@@ -214,9 +222,7 @@ export class OverlayManager extends EventEmitter {
     this.emit('displays', this.numberedList);
     this.dropWindowsNotIn(displays);
     if (IS_LINUX) {
-      this.hyprQueue = this.hyprQueue
-        .then(() => this.placeOnHyprland(fresh))
-        .catch((err: unknown) => console.warn('[overlay]', err));
+      void this.placement.run();
       return;
     }
     for (const d of displays) {
@@ -236,33 +242,53 @@ export class OverlayManager extends EventEmitter {
     }
   }
 
+  /** Linux: one placement at a time; a display that changes meanwhile queues another. */
+  private queuePlacement(): Promise<boolean> {
+    const run = this.hyprQueue.then(() => this.placeOnHyprland());
+    this.hyprQueue = run.catch((err: unknown) => console.warn('[overlay]', err));
+    return run;
+  }
+
   /**
    * Linux: Hyprland places each window by a rule matching its title, so the rule is added before the window is made, and
    * a display Hyprland has no monitor for gets no window (without its rule it would be tiled like any other window).
-   * Runs one at a time; a display that changes meanwhile queues another run.
+   * A window is only replaced once its replacement's rule is in, so a failed hyprctl call leaves the old one on screen.
+   * Resolves with whether every display has an up-to-date window.
    */
-  private async placeOnHyprland(fresh: boolean): Promise<void> {
+  private async placeOnHyprland(): Promise<boolean> {
     const host = this.hypr;
-    if (!host || this.closed) return;
+    if (!host || this.closed) return true;
+    if (this.remakeAll) {
+      this.remakeAll = false;
+      this.shapes.clear(); // every window then looks out of date, until it has been remade
+    }
     const displays = screen.getAllDisplays();
     this.dropWindowsNotIn(displays);
-    const names = matchMonitors(displays, await host.monitors());
+    if (displays.length === 0) return true;
+    const monitors = await host.monitors();
+    if (monitors.length === 0) return false; // no answer: keep the windows there are and try again
+    const names = matchMonitors(displays, monitors);
+    let complete = true;
     for (const d of displays) {
       const monitor = names.get(d.id);
-      const b = d.bounds;
-      const shape = monitor === undefined ? undefined : `${monitor} ${b.x},${b.y} ${b.width}x${b.height}`;
-      const old = this.windows.get(d.id);
-      if (old && !fresh && shape === this.shapes.get(d.id)) continue;
-      if (old) {
-        old.destroy();
-        this.windows.delete(d.id);
-        this.shapes.delete(d.id);
+      if (monitor === undefined) {
+        complete = false;
+        continue;
       }
-      if (monitor === undefined || shape === undefined) continue;
-      if (!(await host.addRules([overlayRule(monitor)])) || this.closed) continue;
+      const b = d.bounds;
+      const shape = `${monitor} ${b.x},${b.y} ${b.width}x${b.height}`;
+      if (this.windows.has(d.id) && shape === this.shapes.get(d.id)) continue;
+      if (!(await host.addRules([overlayRule(monitor)]))) {
+        complete = false;
+        continue;
+      }
+      if (this.closed) return true;
+      const old = this.windows.get(d.id);
+      if (old) old.destroy();
       this.windows.set(d.id, this.createWindow(d, overlayTitle(monitor)));
       this.shapes.set(d.id, shape);
     }
+    return complete;
   }
 
   /** `title` is set on Linux only, where Hyprland's rule for the window matches it. */

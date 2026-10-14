@@ -3,7 +3,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Hyprland } from '../../src/main/hyprland';
+import { Hyprland, Retry } from '../../src/main/hyprland';
 import { overlayRule, SETTINGS_RULE } from '../../src/main/hyprRules';
 
 /** A stand-in for hyprctl: answers by the request, and records every call. */
@@ -164,5 +164,105 @@ describe('Hyprland', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('Retry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets the timers run for `ms`, then lets an attempt they started finish. */
+  const advance = async (ms: number): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(ms);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  it('tries again after 1 s, 2 s and then every 5 s until the attempt works', async () => {
+    let ok = false;
+    const attempt = vi.fn(() => Promise.resolve(ok));
+    const retry = new Retry(attempt);
+    expect(await retry.run()).toBe(false);
+    await advance(999);
+    expect(attempt).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(attempt).toHaveBeenCalledTimes(2);
+    await advance(2000);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    await advance(5000);
+    expect(attempt).toHaveBeenCalledTimes(4);
+    await advance(5000);
+    expect(attempt).toHaveBeenCalledTimes(5);
+    ok = true;
+    await advance(5000);
+    expect(attempt).toHaveBeenCalledTimes(6);
+    await advance(60_000);
+    expect(attempt).toHaveBeenCalledTimes(6);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts the delays over after a success', async () => {
+    let ok = false;
+    const attempt = vi.fn(() => Promise.resolve(ok));
+    const retry = new Retry(attempt);
+    await retry.run();
+    await advance(1000);
+    await advance(2000);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    ok = true;
+    expect(await retry.run()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    ok = false;
+    await retry.run();
+    await advance(1000);
+    expect(attempt).toHaveBeenCalledTimes(6);
+  });
+
+  it('tries now in place of a waiting try, and keeps making the wait longer', async () => {
+    const attempt = vi.fn(() => Promise.resolve(false));
+    const retry = new Retry(attempt);
+    await retry.run();
+    await advance(500);
+    await retry.run(); // a new reason to try, half way through the first wait
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(1999);
+    expect(attempt).toHaveBeenCalledTimes(2);
+    await advance(1);
+    expect(attempt).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts an attempt that throws as one that failed', async () => {
+    const attempt = vi.fn(() => Promise.reject(new Error('hyprctl went away')));
+    const retry = new Retry(attempt);
+    expect(await retry.run()).toBe(false);
+    await advance(1000);
+    expect(attempt).toHaveBeenCalledTimes(2);
+  });
+
+  it('does nothing after stop(), not even a try that was waiting', async () => {
+    const attempt = vi.fn(() => Promise.resolve(false));
+    const retry = new Retry(attempt);
+    await retry.run();
+    retry.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await retry.run()).toBe(false);
+    await advance(60_000);
+    expect(attempt).toHaveBeenCalledOnce();
+  });
+
+  it('schedules nothing when stopped while an attempt was running', async () => {
+    let finish: (ok: boolean) => void = () => undefined;
+    const retry = new Retry(() => new Promise<boolean>((resolve) => {
+      finish = resolve;
+    }));
+    const running = retry.run();
+    retry.stop();
+    finish(false);
+    await running;
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

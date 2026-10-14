@@ -13,13 +13,13 @@ import { formatRoomCode, parseRoomCode } from '../shared/roomCode';
 import { overlaySettings, type Settings } from '../shared/settings';
 import { updateErrorText, type UpdateState } from '../shared/update';
 import { registerAppScheme, serveAppScheme } from './appProtocol';
-import { setAutostart } from './autostart';
+import { refreshAutostart, setAutostart } from './autostart';
 import { resolveTarget, toShared } from './displayNumbers';
 import { EmoteCache } from './emoteCache';
 import { EmoteLibrary, resolveEmoteArt } from './emoteLibrary';
 import { EmoteTransfer } from './emoteTransfer';
 import { isFile } from './fileState';
-import { Hyprland } from './hyprland';
+import { Hyprland, Retry } from './hyprland';
 import { hyprSocketDir, SETTINGS_RULE } from './hyprRules';
 import { InputBridge } from './inputBridge';
 import { LanTransport } from './lanTransport';
@@ -101,10 +101,11 @@ function start(): void {
   // Linux: Hyprland places the overlays and the settings window by window rules, which a config reload drops.
   const hyprDir = IS_LINUX ? hyprSocketDir(process.env) : null;
   const hypr = hyprDir === null ? null : new Hyprland({ socketDir: hyprDir });
-  if (hypr) {
-    const addSettingsRule = (): void => void hypr.addRules([SETTINGS_RULE]);
-    hypr.on('reloaded', addSettingsRule);
-    addSettingsRule();
+  // Without its rule the settings window would be tiled, so the rule is tried again until Hyprland takes it.
+  const settingsRule = hypr ? new Retry(() => hypr.addRules([SETTINGS_RULE])) : null;
+  if (hypr && settingsRule) {
+    hypr.on('reloaded', () => void settingsRule.run());
+    void settingsRule.run();
     hypr.watch();
   }
 
@@ -390,6 +391,20 @@ function start(): void {
   });
   bridge.on('log', (line: string) => console.log('[helper]', line));
 
+  // Linux "open at login": one change at a time, in order, so a quick toggle isn't undone by a write still under way.
+  let autostartQueue: Promise<void> = Promise.resolve();
+  const autostart = (op: () => Promise<unknown>): void => {
+    autostartQueue = autostartQueue
+      .then(op)
+      .then(() => undefined, (err: Error) => console.warn('[autostart]', err.message));
+  };
+  const autostartFile = (): string => join(app.getPath('appData'), 'autostart', 'lolping.desktop');
+  const autostartArgv = (): string[] => [process.env.APPIMAGE || process.execPath, '--hidden'];
+  // The entry holds the AppImage's path, which a newer AppImage in place of the old one changes.
+  if (IS_LINUX && app.isPackaged && settings.launchAtStartup) {
+    autostart(() => refreshAutostart(autostartFile(), autostartArgv()));
+  }
+
   store.on('change', (s: Settings) => {
     const previous = settings;
     settings = s;
@@ -410,9 +425,7 @@ function start(): void {
     if (app.isPackaged && s.launchAtStartup !== previous.launchAtStartup) {
       if (IS_LINUX) {
         // setLoginItemSettings does nothing on Linux: an XDG autostart entry starts lolPing (the AppImage if it is one).
-        const file = join(app.getPath('appData'), 'autostart', 'lolping.desktop');
-        void setAutostart(file, s.launchAtStartup, [process.env.APPIMAGE || process.execPath, '--hidden'])
-          .catch((err: Error) => console.warn('[autostart]', err.message));
+        autostart(() => setAutostart(autostartFile(), s.launchAtStartup, autostartArgv()));
       } else {
         // macOS ignores args, and a Mac launch starts in the menu bar anyway.
         app.setLoginItemSettings(
@@ -493,6 +506,7 @@ function start(): void {
     room.quit(); // says bye, so the others see "left" instead of waiting for a timeout
     transfer.stop();
     stopWaitingForAccess();
+    settingsRule?.stop();
     hypr?.stop();
     tray.destroy();
     overlays.destroy();

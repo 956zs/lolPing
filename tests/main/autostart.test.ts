@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { autostartEntry, execArg, setAutostart } from '../../src/main/autostart';
+import { autostartEntry, autostartUpdate, execArg, refreshAutostart, setAutostart } from '../../src/main/autostart';
 
 describe('autostart', () => {
   describe('execArg', () => {
@@ -56,6 +56,59 @@ describe('autostart', () => {
     it('is null without a command or with one a desktop file can\'t hold', () => {
       expect(autostartEntry([])).toBeNull();
       expect(autostartEntry(['/apps/lol\nPing', '--hidden'])).toBeNull();
+    });
+  });
+
+  describe('autostartUpdate', () => {
+    const argv = ['/home/me/Apps/lolPing-0.6.0.AppImage', '--hidden'];
+
+    it('writes the entry when there is none', () => {
+      expect(autostartUpdate(null, argv)).toBe(autostartEntry(argv));
+    });
+
+    it('writes nothing over an entry that already runs this copy', () => {
+      expect(autostartUpdate(autostartEntry(argv), argv)).toBeNull();
+    });
+
+    it('rewrites an entry that runs another copy, such as the AppImage a new version replaced', () => {
+      const old = autostartEntry(['/home/me/Apps/lolPing-0.5.2.AppImage', '--hidden']);
+      expect(autostartUpdate(old, argv)).toBe(autostartEntry(argv));
+      expect(autostartUpdate('', argv)).toBe(autostartEntry(argv));
+    });
+
+    it('writes nothing for a command a desktop file can\'t hold', () => {
+      expect(autostartUpdate(null, ['/apps/lol\nPing'])).toBeNull();
+      expect(autostartUpdate(null, [])).toBeNull();
+    });
+  });
+
+  describe('refreshAutostart', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'lolping-autostart-'));
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    it('points an old entry at this copy, and leaves an up-to-date one alone', async () => {
+      const file = join(dir, 'autostart', 'lolping.desktop');
+      await setAutostart(file, true, ['/apps/lolPing-0.5.2.AppImage', '--hidden']);
+      expect(await refreshAutostart(file, ['/apps/lolPing-0.6.0.AppImage', '--hidden'])).toBe(true);
+      expect(readFileSync(file, 'utf8')).toContain('Exec=/apps/lolPing-0.6.0.AppImage --hidden\n');
+      const written = statSync(file).mtimeMs;
+      expect(await refreshAutostart(file, ['/apps/lolPing-0.6.0.AppImage', '--hidden'])).toBe(false);
+      expect(statSync(file).mtimeMs).toBe(written);
+    });
+
+    it('writes the entry when it is missing, making the folder', async () => {
+      const file = join(dir, 'autostart', 'lolping.desktop');
+      expect(await refreshAutostart(file, ['/apps/lolping', '--hidden'])).toBe(true);
+      expect(readFileSync(file, 'utf8')).toContain('Exec=/apps/lolping --hidden\n');
+    });
+
+    it('fails when the entry can\'t be read for another reason than not being there', async () => {
+      const file = join(dir, 'lolping.desktop');
+      mkdirSync(file); // a folder where the file should be
+      await expect(refreshAutostart(file, ['/apps/lolping', '--hidden'])).rejects.toThrow();
     });
   });
 

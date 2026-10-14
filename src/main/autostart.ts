@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /** Characters that make an Exec argument need quotes (Desktop Entry spec, "The Exec key"). */
@@ -34,4 +34,28 @@ export async function setAutostart(file: string, on: boolean, argv: readonly str
   if (entry === null) throw new Error(`can't write ${argv[0] ?? 'nothing'} as a desktop entry's Exec`);
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, entry, 'utf8');
+}
+
+/** What to write over an autostart file holding `current` (null: none) so it runs `argv`; null when it already does. */
+export function autostartUpdate(current: string | null, argv: readonly string[]): string | null {
+  const entry = autostartEntry(argv);
+  return entry === null || entry === current ? null : entry;
+}
+
+/**
+ * Linux, at startup with "open at login" on: points the entry at this copy of lolPing, since a newer AppImage replacing
+ * the old file has another path. Writes only when the entry differs. Resolves with whether it wrote.
+ */
+export async function refreshAutostart(file: string, argv: readonly string[]): Promise<boolean> {
+  let current: string | null = null;
+  try {
+    current = await readFile(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const entry = autostartUpdate(current, argv);
+  if (entry === null) return false;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, entry, 'utf8');
+  return true;
 }
