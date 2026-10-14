@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  League of Legends pings and emotes for your whole desktop, on Windows and macOS.<br>
+  League of Legends pings and emotes for your whole desktop, on Windows, macOS and Linux (Hyprland).<br>
   Hold <b>Alt</b> (<b>⌥ Option</b> on a Mac), drag, and let go on a ping. The animation pops and the sound plays on top of any app, on any monitor.<br>
   Hold <b>Ctrl</b> (<b>⌃ Control</b> on a Mac) and drag for the emote wheel: League's emotes, or your own images.
 </p>
@@ -47,6 +47,22 @@ The Mac version needs an Apple Silicon Mac (M1 or later) and macOS 12 or later. 
 
 **After every update**, macOS forgets the Accessibility permission, because the app isn't signed with a fixed developer identity. In **Privacy & Security → Accessibility**, select lolPing, remove it with **–**, then turn it on again. The settings window walks you through it.
 
+### Linux with Hyprland (experimental)
+
+The Linux version runs on the Hyprland compositor (Wayland). There is no download yet: build it from source (see [Build from source](#build-from-source)), or build an AppImage with `npm run dist:linux`.
+
+1. lolPing reads the mouse and keyboard from `/dev/input` and sends back the mouse input it doesn't use through `/dev/uinput`. Add yourself to the `input` group, allow `/dev/uinput`, then log out and back in:
+
+   ```bash
+   sudo usermod -aG input "$USER"
+   echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-lolping-uinput.rules
+   sudo udevadm control --reload && sudo udevadm trigger
+   ```
+
+   Some packages, such as ydotool and Sunshine, already allow `/dev/uinput`.
+2. Start lolPing. Hold Alt and drag anywhere to ping. The tray icon shows in bars that support tray icons (StatusNotifierItem).
+3. To start lolPing with Hyprland, add it to your Hyprland config with `--hidden`. With a Lua config (the end-4 dots: `~/.config/hypr/custom/execs.lua`), put `hl.exec_cmd("/path/to/lolPing.AppImage --hidden")` inside `hl.on("hyprland.start", function() … end)`. With a `hyprland.conf`, add `exec-once = /path/to/lolPing.AppImage --hidden`.
+
 ### Updating an older version
 
 Updating from v0.4 or earlier: download the new version by hand once. From v0.5 on, lolPing updates itself (see [Updates](#updates)).
@@ -62,7 +78,7 @@ Updating from v0.4 or earlier: download the new version by hand once. From v0.5 
 | Open settings | Click the tray icon |
 | Quit, or restart the input helper | Right-click the tray icon |
 
-On a Mac, use **⌥ Option** instead of Alt, **⌃ Control** instead of Ctrl for emotes, **⌃⌥P** to pause, and the ping icon in the menu bar instead of the tray icon.
+On a Mac, use **⌥ Option** instead of Alt, **⌃ Control** instead of Ctrl for emotes, **⌃⌥P** to pause, and the ping icon in the menu bar instead of the tray icon. On Linux, Super takes the place of Win.
 
 The wheel, from the top going clockwise: Danger, Push, On My Way, All In, Assist Me, Need Vision, Enemy Missing, Enemy Vision. You can rearrange it and add Bait or Vision Cleared in settings. The emote wheel has 8 slots too, and you pick its emotes in settings.
 
@@ -70,23 +86,24 @@ The wheel, from the top going clockwise: Danger, Push, On My Way, All In, Assist
 
 <img src="docs/media/settings.png" width="760" alt="The lolPing settings window, with sections for trigger, toggle, pings and sound, wheel, emotes, room and app">
 
-- **Trigger key:** Alt, Ctrl, Shift, Win, Caps Lock, Mouse 4, Mouse 5 or any other key (on a Mac: Option, Control, Shift, Command, Mouse 4, Mouse 5 or any other key). A custom key still types when tapped, but its letter appears when the key comes up, and holding it alone doesn't repeat.
+- **Trigger key:** Alt, Ctrl, Shift, Win, Caps Lock, Mouse 4, Mouse 5 or any other key (on a Mac: Option, Control, Shift, Command, Mouse 4, Mouse 5 or any other key; on Linux: Alt, Ctrl, Shift, Super, Mouse 4 or Mouse 5). A custom key still types when tapped, but its letter appears when the key comes up, and holding it alone doesn't repeat.
 - **Alt + click places a ping:** off by default, so ordinary Alt + click shortcuts keep working. The ping is the one in the centre of the wheel editor (Generic unless you change it).
 - **Pause in fullscreen apps:** on by default. A fullscreen game keeps every click — trigger + click does nothing there — and gestures resume on the desktop and on other monitors. Windowed games aren't detected, and with an auto-hiding taskbar only borderless fullscreen counts. Windows only for now.
 - **Enable / disable shortcut:** must include Ctrl, Alt or Win (⌃, ⌥ or ⌘ on a Mac).
 - **Pings and sound:** size, duration, volume, mute and the wheel's tick sound.
 - **Wheel:** drag any ping onto any slice, including Bait and Vision Cleared, or onto the centre to make it the Alt + click ping. Click a ping to preview it. **Reset to default** brings back League's layout.
 - **Emotes:** the emote key (Ctrl by default, or off), **Ctrl + click places an emote** (off by default), emote size, emote sound and the emote wheel, which you edit like the ping wheel. **Add image…**, or dropping a file on the list, adds your own images: PNG, JPG, GIF or WebP, up to 24. Animated ones play on your screen only.
-- **Launch at Windows startup** (**Open at login** on a Mac): starts hidden in the tray or menu bar.
+- **Launch at Windows startup** (**Open at login** on a Mac): starts hidden in the tray or menu bar. On Linux, **Open at login** adds an entry to `~/.config/autostart`, which Hyprland only runs when the session starts through uwsm or a similar tool. Otherwise use the `exec-once` line from [Install](#linux-with-hyprland-experimental).
 - **Language:** follows the system display language, or pick English or 简体中文.
 
-Settings are saved in `%APPDATA%\lolPing\settings.json` on Windows and `~/Library/Application Support/lolPing/settings.json` on a Mac.
+Settings are saved in `%APPDATA%\lolPing\settings.json` on Windows, `~/Library/Application Support/lolPing/settings.json` on a Mac and `~/.config/lolPing/settings.json` on Linux.
 
 ## Updates
 
 lolPing checks GitHub for a new version 10 seconds after it starts, then every 6 hours. When there is one, you get a notice on screen, and the tray menu and **Settings → App → About** offer **Update**. It asks first: nothing downloads until you click.
 
 - **Windows:** one click downloads the installer, verifies it, installs it silently into the same folder and restarts lolPing. The settings window opens after the restart.
+- **Linux:** lolPing doesn't check for updates and doesn't contact GitHub. Build the new version from source.
 - **Mac:** lolPing downloads the disk image to your Downloads folder, verifies it, explains what to do, opens it, and quits. Drag lolPing into Applications, choose **Replace**, open it, and allow Accessibility again.
 - **Check for updates** in the tray menu, or in **Settings → App → About**, checks right away. From the tray, the result (up to date, or what went wrong) appears as a notice on screen.
 - **Check for updates automatically** (Settings → App, on by default) controls the scheduled checks. With it off, lolPing contacts GitHub only when you click **Check for updates** or **Update**.
@@ -115,6 +132,7 @@ Join a room and everyone in it sees your pings on their own screen, at the same 
 - Sharing a single window doesn't include the pings. Share your entire screen instead.
 - While lolPing is on, Ctrl + drag opens the emote wheel instead of copying files or text. Pick another emote key, or turn it off, in Settings → Emotes.
 - On a Mac, the wheel can't open while a secure screen is showing, such as the login window or a password prompt, and Accessibility has to be allowed again after each update.
+- On Linux, only Hyprland is supported, and only mice open the wheel: a touchpad doesn't. Keys aren't held back, so the pause shortcut and Esc also reach the app in front, and Caps Lock or a custom key can't be the trigger. The overlay may not show over fullscreen windows.
 
 ## Build from source
 
@@ -122,6 +140,7 @@ You need Node 22.12 or later, plus:
 
 - **Windows:** Windows 11 and Visual Studio 2022 or later with the "Desktop development with C++" workload.
 - **macOS:** an Apple Silicon Mac with the Xcode Command Line Tools (`xcode-select --install`). Allow Accessibility for the app that runs `npm run dev` (for example Terminal) so the helper can read input.
+- **Linux:** Hyprland, a C++20 compiler, `pkg-config` and the libevdev headers (`libevdev` on Arch, `libevdev-dev` on Debian and Ubuntu), plus the input permissions from [Install](#linux-with-hyprland-experimental).
 
 ```bash
 npm install
@@ -139,6 +158,7 @@ npm run dev
 | `npm run typecheck` | Type-checks everything |
 | `npm run dist` | Builds the Windows installer into `release/` |
 | `npm run dist:mac` | Builds the Mac disk image into `release/` (on a Mac) |
+| `npm run dist:linux` | Builds a Linux AppImage into `release/` (on Linux) |
 | `npm run dev:site` | Serves a browser demo of the wheel (`site/`) |
 | `npm run media` | Re-records `docs/media/demo.gif` and `docs/media/og.png` from that demo (needs ffmpeg) |
 | `node tools/room-peer/run.mjs <code>` | Joins a room as a fake member that pings at random, to try rooms with one computer; `--relay` joins through the relays and `--emotes` also sends emotes (see [`tools/room-peer`](tools/room-peer)) |

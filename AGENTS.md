@@ -4,16 +4,16 @@ This file is for everyone who changes code here: maintainers, contributors, and 
 
 ## What lolPing is
 
-A League of Legends ping wheel for the Windows and macOS desktop. Hold a key, drag, release on a slice, and a League ping appears with its sound. Emotes and rooms (pinging with friends over the local network or public Nostr relays) are built on the same wheel. It starts with the system, sits in the tray, and stays out of the way of normal mouse and keyboard use.
+A League of Legends ping wheel for the Windows, macOS and Linux (Hyprland) desktop. Hold a key, drag, release on a slice, and a League ping appears with its sound. Emotes and rooms (pinging with friends over the local network or public Nostr relays) are built on the same wheel. It starts with the system, sits in the tray, and stays out of the way of normal mouse and keyboard use.
 
-Supported today: Windows 11 x64, and macOS 12+ on Apple Silicon.
+Supported today: Windows 11 x64, macOS 12+ on Apple Silicon, and Linux on Hyprland (experimental, built from source).
 
 ## Guarantees to keep
 
 Whatever a change adds, the app keeps doing these:
 
 1. **Input passes through.** With lolPing on, every click, key and drag that isn't a wheel gesture reaches the app underneath exactly as it would without lolPing. With lolPing paused, nothing is swallowed. Input must never freeze, lag, drop or reorder.
-2. **Both platforms.** A change for one OS doesn't change behaviour on the other. Gate it with `src/shared/platform.ts` in TypeScript, or put it in the platform's own file in `native/hook-helper/src` (`hooks_win.cpp`, `hooks_mac.cpp`).
+2. **Every platform.** A change for one OS doesn't change behaviour on the others. Gate it with `src/shared/platform.ts` in TypeScript, or put it in the platform's own file in `native/hook-helper/src` (`hooks_win.cpp`, `hooks_mac.cpp`, `hooks_linux.cpp`).
 3. **Both languages.** Every user-facing string lives in `src/shared/i18n.ts` with an English and a Simplified Chinese entry. No hard-coded UI text. A README change goes into both `README.md` and `README.zh-CN.md`.
 4. **Old settings and old peers keep working.** `normalizeSettings` in `src/shared/settings.ts` turns any old or broken settings file into valid settings, so new fields need a default there. Room messages (`src/shared/roomProtocol.ts`) stay readable by older apps; when that can't be done, bump `PROTOCOL_VERSION` so older peers show "needs update". A new relay list keeps at least 3 relays from the old one (see `src/main/relays.ts`).
 5. **Network use is visible.** The app talks to GitHub for update checks, and to the relays and the local network while the user is in a room. Say so in the pull request when a change adds a new host, and describe it in the README's privacy notes.
@@ -32,7 +32,7 @@ Whatever a change adds, the app keeps doing these:
 | `tests/` | Vitest tests, mirroring `src/` |
 | `site/` | The browser demo, reusing the overlay code |
 | `tools/` | Asset extraction, media capture, room and relay test tools |
-| `docs/design.md`, `docs/design-macos.md` | How it works and why. Read the part you change, and update it when behaviour changes. |
+| `docs/design.md`, `docs/design-macos.md`, `docs/design-linux.md` | How it works and why. Read the part you change, and update it when behaviour changes. |
 
 Put new code where its neighbours live. A new IPC channel goes in `src/shared/ipc.ts` or `settingsChannels.ts`, a new setting in `src/shared/settings.ts`, a new string in `i18n.ts`. Reuse what's there before adding something parallel to it.
 

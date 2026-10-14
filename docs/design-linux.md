@@ -95,7 +95,7 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 ## 3. Electron main process
 
 - **Platform:** `Platform` becomes `'win' | 'mac' | 'linux'`, and `platformOf('linux')` returns `'linux'`. Every `Record<Platform, …>` gets a Linux entry, so TypeScript points out each place that needs one.
-- **Wayland:** on Linux with `WAYLAND_DISPLAY` set, main appends `--ozone-platform=wayland` before the app is ready. The overlays need native Wayland windows for the window rules below.
+- **Wayland:** the overlays need native Wayland windows for the window rules below. Electron 38 and later picks native Wayland by itself in a Wayland session. `app.commandLine.appendSwitch` can't choose it, because the backend is chosen before the main script runs.
 - **Helper path:** `hook-helper`, as on macOS.
 - **Overlays:** a new `src/main/hyprland.ts` talks to Hyprland. The rule text and the monitor matching are pure functions in their own module, with tests.
   - There is one window per display, titled `lolPing overlay <monitor>`.
@@ -103,7 +103,9 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
   - Electron displays match Hyprland monitors by layout rect: `x`, `y`, and `width`/`height` divided by `scale` from `hyprctl -j monitors`.
   - Wayland ignores `setBounds`, `setPosition` and `setAlwaysOnTop`. A display whose rect changes gets a new window instead of `setBounds`.
   - `setIgnoreMouseEvents(true)` works on Wayland: in the spike, clicks, scrolling and hover all reached the windows below.
-  - Rules added at runtime are lost when Hyprland reloads its config. Main listens on `.socket2.sock` for `configreloaded` and adds them again. `monitoradded` and `monitorremoved` also trigger a rebuild.
+  - Rules added at runtime are lost when Hyprland reloads its config. Main listens on `.socket2.sock` for `configreloaded`, adds them again and remakes the overlays (pings on screen at that moment disappear). If adding a rule keeps causing a reload, it stops after a few rounds. `monitoradded` and `monitorremoved` also trigger a rebuild.
+  - Whether the config is Lua or hyprlang comes from `hyprctl -j status` (`configProvider`).
+  - A display without a Hyprland monitor or without its rule gets no overlay, because Hyprland would tile it.
   - Coordinate maps use `phys = dip` and `scale = 1`, as on macOS.
 - **Settings window:** an opaque Fluent background (Mica is Windows-only) with Electron's caption buttons (`titleBarOverlay`). A Hyprland rule floats it and centres it.
 - **Tray:** Electron's `Tray` is a StatusNotifierItem on Linux, and the end4 bar shows it. It uses a plain PNG; off is dimmed.

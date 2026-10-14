@@ -112,13 +112,15 @@ lolPing/
       settings/                index.html, App.tsx, useAppState.ts, components/ (Fluent UI)
     shared/                    pings.ts, settings.ts (schema + defaults), keys.ts,
                                protocol.ts (helper messages), ipc.ts, geometry.ts
-  native/hook-helper/          build.cmd (MSVC via vswhere), build.sh (macOS), run.mjs, src/ main_win.cpp,
+  native/hook-helper/          build.cmd (MSVC via vswhere), build.sh (macOS, Linux), run.mjs, src/ main_win.cpp,
                                hooks_win.cpp, simulate.cpp, decision.{h,cpp} (pure logic), commands, json, output,
-                               macOS: main_posix.cpp, hooks_mac.cpp, macinput.{h,cpp}; tests/
+                               macOS: main_posix.cpp, hooks_mac.cpp, macinput.{h,cpp};
+                               Linux: main_posix.cpp, hooks_linux.cpp, linuxinput.{h,cpp}; tests/
   assets/textures, assets/sounds
   tools/extract-assets/
   prototype/                   throwaway demos (wheel-demo.html, settings-demo.html)
   docs/design.md               this document
+  docs/design-linux.md         the Linux (Hyprland) port
 ```
 
 ## 5. Hook helper

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  把英雄联盟的信号和表情搬到整个桌面，支持 Windows 和 macOS。<br>
+  把英雄联盟的信号和表情搬到整个桌面，支持 Windows、macOS 和 Linux（Hyprland）。<br>
   按住 <b>Alt</b>（Mac 上是 <b>⌥ Option</b>）拖动，在想要的信号上松开：动画弹出、音效响起，任何程序之上、任何显示器上都可以。<br>
   按住 <b>Ctrl</b>（Mac 上是 <b>⌃ Control</b>）拖动打开表情轮盘：英雄联盟的表情，或你自己的图片。
 </p>
@@ -47,6 +47,22 @@ Mac 版需要 Apple 芯片（M1 或更新）的 Mac 和 macOS 12 或更新版本
 
 **每次更新后**，macOS 都会忘记辅助功能权限，因为应用没有固定的开发者签名。在**隐私与安全性 → 辅助功能**中选中 lolPing，点 **–** 移除，再重新打开。设置窗口会一步步提示你。
 
+### Linux + Hyprland（实验性）
+
+Linux 版运行在 Hyprland 合成器（Wayland）上。目前没有安装包：请从源码构建（见[从源码构建](#从源码构建)），或用 `npm run dist:linux` 生成 AppImage。
+
+1. lolPing 从 `/dev/input` 读取鼠标和键盘，再通过 `/dev/uinput` 把它不用的鼠标输入送回去。把自己加入 `input` 组、允许访问 `/dev/uinput`，然后注销再登录：
+
+   ```bash
+   sudo usermod -aG input "$USER"
+   echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-lolping-uinput.rules
+   sudo udevadm control --reload && sudo udevadm trigger
+   ```
+
+   有些软件包（例如 ydotool 和 Sunshine）已经允许了 `/dev/uinput`。
+2. 启动 lolPing。按住 Alt 在任意位置拖动即可发信号。支持托盘图标（StatusNotifierItem）的状态栏会显示 lolPing 的图标。
+3. 要让 lolPing 随 Hyprland 启动，把它加上 `--hidden` 写进 Hyprland 配置。Lua 配置（end-4 的配置：`~/.config/hypr/custom/execs.lua`）：在 `hl.on("hyprland.start", function() … end)` 里加入 `hl.exec_cmd("/path/to/lolPing.AppImage --hidden")`。`hyprland.conf`：加入 `exec-once = /path/to/lolPing.AppImage --hidden`。
+
 ### 升级旧版本
 
 从 v0.4 或更早的版本更新：请手动下载一次新版本。从 v0.5 起，lolPing 会自己更新（见[更新](#更新)）。
@@ -62,7 +78,7 @@ Mac 版需要 Apple 芯片（M1 或更新）的 Mac 和 macOS 12 或更新版本
 | 打开设置 | 单击托盘图标 |
 | 退出，或重启输入助手 | 右键托盘图标 |
 
-在 Mac 上：用 **⌥ Option** 代替 Alt，用 **⌃ Control** 代替 Ctrl 发表情，用 **⌃⌥P** 暂停，用菜单栏中的信号图标代替托盘图标。
+在 Mac 上：用 **⌥ Option** 代替 Alt，用 **⌃ Control** 代替 Ctrl 发表情，用 **⌃⌥P** 暂停，用菜单栏中的信号图标代替托盘图标。在 Linux 上：用 Super 代替 Win。
 
 轮盘从正上方开始顺时针依次是：危险（撤退）、推进、正在赶来、全力进攻（All In）、请求协助、需要视野、敌人消失、敌方视野。可以在设置中重新排列，或换上诱饵、视野已清除。表情轮盘同样有 8 个扇区，要放哪些表情在设置中选择。
 
@@ -70,23 +86,24 @@ Mac 版需要 Apple 芯片（M1 或更新）的 Mac 和 macOS 12 或更新版本
 
 <img src="docs/media/settings.zh-CN.png" width="760" alt="lolPing 设置窗口，包含触发、开关、信号与声音、轮盘、表情、房间和应用几个部分">
 
-- **触发键：** Alt、Ctrl、Shift、Win、Caps Lock、鼠标侧键 4/5，或任意其他按键（Mac 上：Option、Control、Shift、Command、鼠标侧键 4/5，或任意其他按键）。自定义按键单按时仍会输入字符，但字符在松开按键时才出现，单独按住也不会连续输入。
+- **触发键：** Alt、Ctrl、Shift、Win、Caps Lock、鼠标侧键 4/5，或任意其他按键（Mac 上：Option、Control、Shift、Command、鼠标侧键 4/5，或任意其他按键；Linux 上：Alt、Ctrl、Shift、Super、鼠标侧键 4/5）。自定义按键单按时仍会输入字符，但字符在松开按键时才出现，单独按住也不会连续输入。
 - **Alt + 单击发送信号：** 默认关闭，这样平时的 Alt + 单击快捷操作不受影响。发送的是轮盘编辑器中心的信号（默认是普通信号）。
 - **全屏程序中暂停：** 默认开启。全屏游戏独占所有点击——触发键 + 单击原样交给程序——回到桌面或在其他显示器上手势恢复正常。窗口化游戏检测不到；任务栏自动隐藏时只识别无边框全屏。目前仅限 Windows。
 - **开关快捷键：** 必须包含 Ctrl、Alt 或 Win（Mac 上为 ⌃、⌥ 或 ⌘）。
 - **信号与声音：** 大小、持续时间、音量、静音、轮盘提示音。
 - **轮盘：** 把任意信号（包括诱饵和视野已清除）拖到任意扇区，或拖到中心设为 Alt + 单击发送的信号。单击信号可预览。**恢复默认**会还原英雄联盟的布局。
 - **表情：** 表情键（默认 Ctrl，也可以关闭）、**Ctrl + 单击发送表情**（默认关闭）、表情大小、表情音效，以及表情轮盘（编辑方式和信号轮盘相同）。点**添加图片…**，或把文件拖到列表上，可以加入自己的图片：PNG、JPG、GIF 或 WebP，最多 24 张。动图只在你自己的屏幕上播放。
-- **开机启动**（Mac 上为**登录时打开**）：启动后隐藏在托盘或菜单栏中。
+- **开机启动**（Mac 上为**登录时打开**）：启动后隐藏在托盘或菜单栏中。在 Linux 上，**登录时打开**会在 `~/.config/autostart` 中添加一项，只有用 uwsm 等工具启动的 Hyprland 会话才会运行它；否则请用[安装](#linux--hyprland实验性)中的 `exec-once` 写法。
 - **语言：** 默认跟随系统显示语言，也可以手动选择 English 或简体中文。
 
-设置在 Windows 上保存在 `%APPDATA%\lolPing\settings.json`，在 Mac 上保存在 `~/Library/Application Support/lolPing/settings.json`。
+设置在 Windows 上保存在 `%APPDATA%\lolPing\settings.json`，在 Mac 上保存在 `~/Library/Application Support/lolPing/settings.json`，在 Linux 上保存在 `~/.config/lolPing/settings.json`。
 
 ## 更新
 
 lolPing 在启动 10 秒后向 GitHub 检查一次新版本，之后每 6 小时检查一次。有新版本时，屏幕上会出现提示，托盘菜单和**设置 → 应用 → 关于**里也会出现**更新**。更新前会先询问：在你点击之前不会下载任何内容。
 
 - **Windows：** 点一下即可下载安装程序、校验、静默安装到原来的文件夹，并重启 lolPing。重启后会打开设置窗口。
+- **Linux：** lolPing 不检查更新，也不连接 GitHub。请从源码构建新版本。
 - **Mac：** lolPing 把磁盘映像下载到“下载”文件夹，校验后先说明接下来的步骤，再打开它，然后退出。请把 lolPing 拖进“应用程序”，选择**替换**，打开它，并再次允许辅助功能。
 - 托盘菜单或**设置 → 应用 → 关于**中的**检查更新**会立即检查。从托盘菜单检查时，结果（已是最新版本，或出错的原因）会以屏幕通知的形式显示。
 - **自动检查更新**（设置 → 应用，默认开启）控制定时检查。关闭后，只有在你点击**检查更新**或**更新**时，lolPing 才会联系 GitHub。
@@ -115,6 +132,7 @@ lolPing 在启动 10 秒后向 GitHub 检查一次新版本，之后每 6 小时
 - 只共享单个窗口时看不到信号，请改为共享整个屏幕。
 - 开启 lolPing 后，Ctrl + 拖动会打开表情轮盘，而不是复制文件或文字。可以在**设置 → 表情**中换一个表情键，或者把它关掉。
 - 在 Mac 上，登录窗口或密码提示等安全界面出现时无法打开轮盘；每次更新后需要重新允许辅助功能权限。
+- 在 Linux 上，只支持 Hyprland，而且只有鼠标能打开轮盘，触控板不行。按键不会被拦下，所以暂停快捷键和 Esc 也会传给前台程序，Caps Lock 和自定义按键也不能当触发键。信号层可能不会显示在全屏窗口之上。
 
 ## 从源码构建
 
@@ -122,6 +140,7 @@ lolPing 在启动 10 秒后向 GitHub 检查一次新版本，之后每 6 小时
 
 - **Windows：** Windows 11，以及安装了“使用 C++ 的桌面开发”工作负载的 Visual Studio 2022 或更新版本。
 - **macOS：** 装有 Xcode 命令行工具（`xcode-select --install`）的 Apple 芯片 Mac。请为运行 `npm run dev` 的程序（例如“终端”）开启辅助功能权限，输入助手才能读取输入。
+- **Linux：** Hyprland、支持 C++20 的编译器、`pkg-config` 和 libevdev 头文件（Arch 上是 `libevdev`，Debian 和 Ubuntu 上是 `libevdev-dev`），以及[安装](#linux--hyprland实验性)中的输入权限。
 
 ```bash
 npm install
@@ -139,6 +158,7 @@ npm run dev
 | `npm run typecheck` | 全量类型检查 |
 | `npm run dist` | 在 `release/` 中生成 Windows 安装程序 |
 | `npm run dist:mac` | 在 `release/` 中生成 Mac 磁盘映像（需在 Mac 上运行） |
+| `npm run dist:linux` | 在 `release/` 中生成 Linux AppImage（需在 Linux 上运行） |
 | `npm run dev:site` | 启动轮盘的浏览器演示页（`site/`） |
 | `npm run media` | 用演示页重新录制 `docs/media/demo.gif` 和 `docs/media/og.png`（需要 ffmpeg） |
 | `node tools/room-peer/run.mjs <房间码>` | 以假成员身份加入房间并随机发信号，一台电脑也能试用房间功能；加 `--relay` 则通过中继加入，加 `--emotes` 则同时发表情（见 [`tools/room-peer`](tools/room-peer)） |
