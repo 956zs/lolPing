@@ -186,3 +186,19 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 | Config reload | After `hyprctl reload` the overlay was floating and pinned again. |
 | Helper killed | The clones disappeared at once, so the pointer was free, and the helper was back with its grabs within 3 s. |
 | Not checked yet | Two monitors, fractional scaling, Firefox's menu bar, end-4's Super overview, the hyprlang fallback, the AppImage and open at login. |
+
+## 10. Performance (2026-10-15)
+
+Measured on the developer's laptop (Intel, Hyprland 0.56.1, one 1920×1200 monitor) with the production build started with `--hidden`, as at login. CPU is a percentage of one core, memory is PSS, and wakeups are context switches per second, summed over every lolPing process. Other programs were running, so Hyprland's own numbers moved between 3 and 15 % whether or not lolPing was running.
+
+| Situation | CPU | Wakeups/s | Memory |
+|---|---|---|---|
+| Start until the wheel can open | about 1.1 s | | |
+| Idle, before the audio fix | 2.8–2.9 % | 335–375 | 320–370 MB |
+| Idle, with the audio fix | 0.4 % | 66 | 260–360 MB |
+| Mouse in use (helper only) | +0.7 % | +75 | 0.6 MB |
+| A ping every second | about 130 % (overlay 68 %, GPU 42 %) | about 3200 | 440 MB |
+
+- **Idle audio:** a running AudioContext renders silence every buffer (about 10.7 ms), even when nothing plays. After a sound it also keeps an output stream open in the audio service. On Linux the overlay suspends the context 5 s after the last sound; a resume took 6–11 ms here. Windows and macOS keep the context running, because the resume time hasn't been measured there.
+- **Helper:** about 98 µs of CPU per forwarded mouse frame, so it scales with the mouse's report rate while the mouse moves, and costs nothing while it doesn't.
+- **Pings:** the cost is the overlay's animations (shadows and drop-shadow filters on moving elements), shared with the other platforms, and only lasts while pings are on screen. GPU compositing and rasterization are on.
