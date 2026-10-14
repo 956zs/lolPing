@@ -44,6 +44,7 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 - Events that aren't swallowed are written to the clone unchanged, frame by frame, `SYN_REPORT` included.
 - **Swallow:** the event isn't written.
 - **Replay:** Decision's button down and up are written to the clone of the mouse the gesture came from, each followed by `SYN_REPORT`.
+- The clone comes first and the grab 250 ms later, once the compositor has opened the clone, so no event is lost in between.
 - A mouse is grabbed only when none of its buttons is held. Until then the helper watches it without a grab, so libinput never misses a release.
 - **Paused:** the helper drops its grabs and destroys the clones. A paused lolPing is not in the input path at all. During key capture (`suspend`) the grabs stay and Decision passes everything through.
 - **Exit** (stdin EOF, `shutdown`, crash): the kernel drops a grab when its file closes, and the clones disappear with the process. The spike checked this.
@@ -88,7 +89,7 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 
 - `/dev/input/event*` needs the `input` group.
 - `/dev/uinput` needs a udev rule, for example `KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"`. Some packages, such as ydotool and Sunshine, already install one.
-- When no mouse or `/dev/uinput` can be opened, the helper prints `{"type":"error","code":"noAccess",…}` and exits with code 3, as on macOS. `InputBridge` already treats code 3 as "no access", not as a crash.
+- When `/dev/uinput` can't be opened, or no mouse can be read and at least one input node was refused, the helper prints `{"type":"error","code":"noAccess",…}` and exits with code 3, as on macOS. With access but no mouse plugged in, it keeps running and waits for one. `InputBridge` already treats code 3 as "no access", not as a crash.
 - The settings window shows a Linux permission card with the commands to run and a Try again button. It uses the error's `code` to choose between the permission text and the Hyprland text.
 
 ## 3. Electron main process
