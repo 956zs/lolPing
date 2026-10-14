@@ -12,7 +12,8 @@
 
 <p align="center">
   <a href="https://github.com/darrenprx/lolPing/releases/latest"><b>Download for Windows</b></a> ·
-  <a href="https://github.com/darrenprx/lolPing/releases/latest"><b>Download for Mac</b></a> (Apple Silicon, experimental)
+  <a href="https://github.com/darrenprx/lolPing/releases/latest"><b>Download for Mac</b></a> (Apple Silicon, experimental) ·
+  <a href="#linux-with-hyprland-experimental"><b>Linux with Hyprland</b></a> (build from source, experimental)
 </p>
 
 <p align="center">
@@ -89,7 +90,7 @@ The wheel, from the top going clockwise: Danger, Push, On My Way, All In, Assist
 - **Trigger key:** Alt, Ctrl, Shift, Win, Caps Lock, Mouse 4, Mouse 5 or any other key (on a Mac: Option, Control, Shift, Command, Mouse 4, Mouse 5 or any other key; on Linux: Alt, Ctrl, Shift, Super, Mouse 4 or Mouse 5). A custom key still types when tapped, but its letter appears when the key comes up, and holding it alone doesn't repeat.
 - **Alt + click places a ping:** off by default, so ordinary Alt + click shortcuts keep working. The ping is the one in the centre of the wheel editor (Generic unless you change it).
 - **Pause in fullscreen apps:** on by default. A fullscreen game keeps every click — trigger + click does nothing there — and gestures resume on the desktop and on other monitors. Windowed games aren't detected, and with an auto-hiding taskbar only borderless fullscreen counts. Windows only for now.
-- **Enable / disable shortcut:** must include Ctrl, Alt or Win (⌃, ⌥ or ⌘ on a Mac).
+- **Enable / disable shortcut:** must include Ctrl, Alt or Win (⌃, ⌥ or ⌘ on a Mac, Super instead of Win on Linux).
 - **Pings and sound:** size, duration, volume, mute and the wheel's tick sound.
 - **Wheel:** drag any ping onto any slice, including Bait and Vision Cleared, or onto the centre to make it the Alt + click ping. Click a ping to preview it. **Reset to default** brings back League's layout.
 - **Emotes:** the emote key (Ctrl by default, or off), **Ctrl + click places an emote** (off by default), emote size, emote sound and the emote wheel, which you edit like the ping wheel. **Add image…**, or dropping a file on the list, adds your own images: PNG, JPG, GIF or WebP, up to 24. Animated ones play on your screen only.
@@ -111,13 +112,13 @@ lolPing checks GitHub for a new version 10 seconds after it starts, then every 6
 
 ## Ping with friends (rooms)
 
-Join a room and everyone in it sees your pings on their own screen, at the same spot (scaled to their resolution), with your name under them. Their pings show up on yours. It works between Windows and Mac.
+Join a room and everyone in it sees your pings on their own screen, at the same spot (scaled to their resolution), with your name under them. Their pings show up on yours. It works between Windows, Mac and Linux.
 
 1. One person opens **Settings → Room** (or the tray menu → **Room**) and clicks **Create room**.
 2. They copy the code, such as `PING-7KQ4M-2HXTR`, and send it to friends.
 3. Each friend copies it and clicks **Join from clipboard** in the tray menu, or pastes it into the Room page and clicks **Join**.
 
-- **Same network:** the first time, Windows asks whether lolPing may use the network: allow it, and set your Wi‑Fi to **Private** (Windows blocks it on Public networks). A Mac asks to find devices on the local network.
+- **Same network:** the first time, Windows asks whether lolPing may use the network: allow it, and set your Wi‑Fi to **Private** (Windows blocks it on Public networks). A Mac asks to find devices on the local network. On Linux, if a firewall is on, allow UDP port 47474.
 - **Different networks:** with **Allow internet connections** on (the default), friends anywhere join with the same code. Their pings travel through free public [Nostr](https://nostr.com) relays and take a moment longer than on a local network, which is still used whenever it works. Virtual LANs such as ZeroTier or Radmin VPN work too, and Tailscale users simply connect over the internet.
 - A ping lands on the display with the same number (1 is the primary display), or on display 1.
 - **Emotes** travel like pings: friends see yours on their own screen with your name under it. Your own images reach friends as a small still picture; animations stay on your computer. Friends' images are kept in a small cache on your computer. **Show friends' custom emotes** in Settings → Room turns this off both ways: nothing is sent or fetched, and friends' images show as "?". Friends on v0.4 or older don't see emotes, and the Room page says so under their names.
@@ -170,13 +171,13 @@ Bump `version` in `package.json`, commit, then push a matching tag such as `v0.2
 
 ## How it works
 
-- **Input:** [`native/hook-helper`](native/hook-helper) is a small C++ process that owns the low-level mouse and keyboard hooks on Windows, or an event tap on macOS. It swallows the Alt + drag so the app underneath never sees it, and talks to Electron in JSON lines over stdin and stdout.
-- **Display:** Electron draws the wheel and pings in one transparent, click-through, always-on-top window per monitor ([`src/renderer/overlay`](src/renderer/overlay)), and plays the sounds through Web Audio.
+- **Input:** [`native/hook-helper`](native/hook-helper) is a small C++ process that owns the low-level mouse and keyboard hooks on Windows, or an event tap on macOS. On Linux it grabs the mice through evdev, forwards what it doesn't use through uinput clones, only reads the keyboards, and asks Hyprland where the cursor is. It swallows the Alt + drag so the app underneath never sees it, and talks to Electron in JSON lines over stdin and stdout.
+- **Display:** Electron draws the wheel and pings in one transparent, click-through, always-on-top window per monitor ([`src/renderer/overlay`](src/renderer/overlay)), and plays the sounds through Web Audio. On Linux, Hyprland window rules that lolPing adds at runtime ([`src/main/hyprland.ts`](src/main/hyprland.ts)) float, pin and size these windows.
 - **Rooms:** [`src/main/roomManager.ts`](src/main/roomManager.ts) keeps the room's members and encrypts every message (AES-256-GCM, key from scrypt over the room code). [`src/main/lanTransport.ts`](src/main/lanTransport.ts) carries the encrypted packets over UDP on the local network, and [`src/main/relayTransport.ts`](src/main/relayTransport.ts) through public Nostr relays as ephemeral events.
 - **Updates:** [`src/main/updater.ts`](src/main/updater.ts) runs the schedule and the state the tray and settings show. [`src/main/updateWin.ts`](src/main/updateWin.ts) updates through electron-updater and the `latest.yml` on the release, and [`src/main/updateMac.ts`](src/main/updateMac.ts) reads the GitHub releases API and checks the disk image against its SHA-256.
-- **Settings:** a Fluent UI window ([`src/renderer/settings`](src/renderer/settings)) with Mica on Windows, restyled like System Settings on macOS.
+- **Settings:** a Fluent UI window ([`src/renderer/settings`](src/renderer/settings)) with Mica on Windows, restyled like System Settings on macOS, and on an opaque background on Linux.
 - **Demo page:** [`site`](site) runs the same overlay code in the browser, with a small input shim in place of the helper. The README GIF is recorded from it.
-- **Design notes:** [docs/design.md](docs/design.md) covers the protocol, the input state machine and the multi-monitor maths. [docs/design-macos.md](docs/design-macos.md) covers the Mac port.
+- **Design notes:** [docs/design.md](docs/design.md) covers the protocol, the input state machine and the multi-monitor maths. [docs/design-macos.md](docs/design-macos.md) covers the Mac port, and [docs/design-linux.md](docs/design-linux.md) the Linux port.
 
 ## Contributing
 
@@ -184,7 +185,7 @@ Pull requests and ideas are welcome. Before you start:
 
 - Read [AGENTS.md](AGENTS.md): the layout, the behaviour every change keeps, and the code, test and commit conventions. If you use an AI tool, give it that file too. Claude Code reads it through `CLAUDE.md`, and most other agents read `AGENTS.md` on their own.
 - Title the pull request in [Conventional Commits](https://www.conventionalcommits.org/) style, such as `fix(helper): keep clicks in order after a cancelled wheel`. Pull requests are squash-merged, so the title becomes the commit on `main`.
-- Keep one change per pull request and fill in the template. CI has to pass on Windows and macOS before anything merges.
+- Keep one change per pull request and fill in the template. CI has to pass on Windows, macOS and Linux before anything merges.
 - For bigger ideas, open an issue or a [discussion](https://github.com/darrenprx/lolPing/discussions) first, so we can agree on the approach before you write it.
 
 ## Ping assets
