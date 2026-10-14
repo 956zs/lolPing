@@ -1,6 +1,6 @@
 import { app, BrowserWindow, nativeImage, nativeTheme, type BrowserWindowConstructorOptions } from 'electron';
 import { SETTINGS_CH } from '../shared/settingsChannels';
-import { assetPath, IS_MAC, loadPage, pageUrl, preloadPath } from './paths';
+import { assetPath, IS_LINUX, IS_MAC, loadPage, pageUrl, preloadPath } from './paths';
 
 let win: BrowserWindow | null = null;
 const goneListeners: Array<() => void> = [];
@@ -18,13 +18,19 @@ const notifyGone = (): void => {
   for (const cb of goneListeners) cb();
 };
 
+/** Linux has no Mica: an opaque page in the colours Mica has on Windows 11 (settings.css uses the same). */
+const linuxBackground = (): string => (nativeTheme.shouldUseDarkColors ? '#202020' : '#f3f3f3');
+
 const captionColors = () => ({
-  color: '#00000000',
+  color: IS_LINUX ? linuxBackground() : '#00000000',
   symbolColor: nativeTheme.shouldUseDarkColors ? '#ffffff' : '#1a1a1a',
   height: 40,
 });
 
-/** Windows 11: Mica with custom caption buttons. macOS: sidebar vibrancy with inset traffic lights. */
+/**
+ * Windows 11: Mica with custom caption buttons. macOS: sidebar vibrancy with inset traffic lights. Linux: the Windows
+ * look on an opaque background; Hyprland's rule (hyprRules.ts) floats the window in the middle of the screen.
+ */
 const chromeOptions = (): BrowserWindowConstructorOptions => (IS_MAC
   ? {
     vibrancy: 'sidebar',
@@ -33,12 +39,14 @@ const chromeOptions = (): BrowserWindowConstructorOptions => (IS_MAC
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 20, y: 19 },
   }
-  : {
-    backgroundMaterial: 'mica',
-    backgroundColor: '#00000000',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: captionColors(),
-  });
+  : IS_LINUX
+    ? { backgroundColor: linuxBackground(), titleBarStyle: 'hidden', titleBarOverlay: captionColors() }
+    : {
+      backgroundMaterial: 'mica',
+      backgroundColor: '#00000000',
+      titleBarStyle: 'hidden',
+      titleBarOverlay: captionColors(),
+    });
 
 /** lolPing lives in the macOS menu bar: it only has a Dock icon (and ⌘-Tab entry) while settings are open. */
 function showInDock(on: boolean): void {
@@ -93,7 +101,9 @@ export function openSettingsWindow(section?: string): BrowserWindow {
   });
   if (!IS_MAC) w.removeMenu(); // no menu bar, so pressing Alt in the window does nothing (macOS keeps the app menu)
   const onTheme = () => {
-    if (!w.isDestroyed() && !IS_MAC) w.setTitleBarOverlay(captionColors());
+    if (w.isDestroyed() || IS_MAC) return;
+    w.setTitleBarOverlay(captionColors());
+    if (IS_LINUX) w.setBackgroundColor(linuxBackground());
   };
   nativeTheme.on('updated', onTheme);
   w.on('closed', () => {

@@ -7,23 +7,26 @@ import { resolveLang, strings, type Strings } from '../shared/i18n';
 import { SETTINGS_CH, type About, type AppStatus } from '../shared/ipc';
 import { announcedEmoteHashes } from '../shared/emotes';
 import { hotkeyLabel } from '../shared/keys';
-import { configCommand, type HelperStatus } from '../shared/protocol';
+import { accessProblemOf, configCommand, type HelperStatus } from '../shared/protocol';
 import type { RoomState } from '../shared/room';
 import { formatRoomCode, parseRoomCode } from '../shared/roomCode';
 import { overlaySettings, type Settings } from '../shared/settings';
 import { updateErrorText, type UpdateState } from '../shared/update';
 import { registerAppScheme, serveAppScheme } from './appProtocol';
+import { setAutostart } from './autostart';
 import { resolveTarget, toShared } from './displayNumbers';
 import { EmoteCache } from './emoteCache';
 import { EmoteLibrary, resolveEmoteArt } from './emoteLibrary';
 import { EmoteTransfer } from './emoteTransfer';
 import { isFile } from './fileState';
+import { Hyprland } from './hyprland';
+import { hyprSocketDir, SETTINGS_RULE } from './hyprRules';
 import { InputBridge } from './inputBridge';
 import { LanTransport } from './lanTransport';
 import { RELAYS } from './relays';
 import { RelayTransport } from './relayTransport';
 import { OverlayManager, type SharedEmote, type SharedPing } from './overlayManager';
-import { assetPath, buildResourcePath, helperExePath, IS_MAC, PLATFORM, settingsDir } from './paths';
+import { assetPath, buildResourcePath, helperExePath, IS_LINUX, IS_MAC, PLATFORM, settingsDir } from './paths';
 import { deriveRoomKeys } from './roomCrypto';
 import { RoomManager, type RoomToast } from './roomManager';
 import { registerSettingsIpc } from './settingsIpc';
@@ -95,6 +98,16 @@ function start(): void {
   let quitting = false; // read by pushStatus: once true, the tray and overlays are gone
   let capturing = false; // the settings page is listening for a key, so the helper must stay suspended
 
+  // Linux: Hyprland places the overlays and the settings window by window rules, which a config reload drops.
+  const hyprDir = IS_LINUX ? hyprSocketDir(process.env) : null;
+  const hypr = hyprDir === null ? null : new Hyprland({ socketDir: hyprDir });
+  if (hypr) {
+    const addSettingsRule = (): void => void hypr.addRules([SETTINGS_RULE]);
+    hypr.on('reloaded', addSettingsRule);
+    addSettingsRule();
+    hypr.watch();
+  }
+
   const overlays = new OverlayManager(
     overlaySettings(settings),
     (ref, remote) =>
@@ -103,13 +116,15 @@ function start(): void {
         cache.touch(hash); // a shown still is the most recently used at the next cache sweep
         return true;
       }),
+    hypr,
   );
   overlays.start();
   const bridge = new InputBridge({ command: helperExePath() });
 
   // Updates: only in an installed build, or in a development build pointed at a test server with LOLPING_UPDATE_TEST_URL.
+  // Never on Linux: there are no Linux release files to update to.
   const testUrl = process.env.LOLPING_UPDATE_TEST_URL || undefined;
-  const updater = app.isPackaged || testUrl ? createUpdater() : null;
+  const updater = !IS_LINUX && (app.isPackaged || testUrl) ? createUpdater() : null;
   function createUpdater(): Updater {
     const backend = IS_MAC
       ? new MacBackend({
@@ -205,6 +220,8 @@ function start(): void {
   // the permission instead. `staleAccess`: macOS lists lolPing as allowed, yet the helper still has no access.
   let accessTimer: NodeJS.Timeout | null = null;
   let staleAccess = false;
+  // Linux: the code of the helper's last error, which says what a helper that exits for lack of access is missing.
+  let helperErrorCode: string | undefined;
   const trusted = (): boolean => !IS_MAC || systemPreferences.isTrustedAccessibilityClient(false);
   const stopWaitingForAccess = (): void => {
     if (accessTimer) clearInterval(accessTimer);
@@ -228,7 +245,12 @@ function start(): void {
   };
 
   const helperStatus = (): HelperStatus => (accessTimer ? 'noAccess' : bridge.status);
-  const status = (): AppStatus => ({ enabled, helper: helperStatus(), staleAccess });
+  const status = (): AppStatus => ({
+    enabled,
+    helper: helperStatus(),
+    staleAccess,
+    ...(IS_LINUX ? { accessProblem: accessProblemOf(helperErrorCode) } : {}),
+  });
   const trayMode = (): TrayMode => {
     const h = helperStatus();
     if (h === 'failed' || h === 'noAccess') return h;
@@ -340,18 +362,27 @@ function start(): void {
   bridge.on('event', (ev) => {
     if (ev.type === 'toggled') setEnabled(ev.enabled);
     else if (ev.type === 'ready') {
+      helperErrorCode = undefined;
       // A restarted helper starts unsuspended: re-apply an active key capture.
       if (capturing) bridge.send({ type: 'suspend', on: true });
-    } else if (ev.type === 'error') console.warn('[helper]', ev.code ?? '', ev.message);
-    else overlays.handle(ev);
+    } else if (ev.type === 'error') {
+      console.warn('[helper]', ev.code ?? '', ev.message);
+      if (IS_LINUX && ev.code) {
+        helperErrorCode = ev.code;
+        pushStatus(); // the helper's exit can be seen before this line, so the card may need its text changed now
+      }
+    } else overlays.handle(ev);
   });
   bridge.on('status', (s: HelperStatus) => {
     // A helper that is starting or has stopped can no longer send the cancel that dismisses a wheel left on screen.
     if (s !== 'running') overlays.cancelWheel();
     if (s === 'noAccess') {
-      // Allowed but still refused is an entry left over from an earlier build. Otherwise wait for the user to allow it.
-      if (trusted()) staleAccess = true;
-      else waitForAccess();
+      // macOS: allowed but still refused is an entry left over from an earlier build. Otherwise wait for the user to
+      // allow it. Linux has nothing to wait for: the card says what to do, and its Try again starts the helper again.
+      if (!IS_LINUX) {
+        if (trusted()) staleAccess = true;
+        else waitForAccess();
+      }
       openSettingsWindow();
     }
     pushStatus();
@@ -377,8 +408,17 @@ function start(): void {
       pushRoom();
     }
     if (app.isPackaged && s.launchAtStartup !== previous.launchAtStartup) {
-      // macOS ignores args, and a Mac launch starts in the menu bar anyway.
-      app.setLoginItemSettings(IS_MAC ? { openAtLogin: s.launchAtStartup } : { openAtLogin: s.launchAtStartup, args: ['--hidden'] });
+      if (IS_LINUX) {
+        // setLoginItemSettings does nothing on Linux: an XDG autostart entry starts lolPing (the AppImage if it is one).
+        const file = join(app.getPath('appData'), 'autostart', 'lolping.desktop');
+        void setAutostart(file, s.launchAtStartup, [process.env.APPIMAGE || process.execPath, '--hidden'])
+          .catch((err: Error) => console.warn('[autostart]', err.message));
+      } else {
+        // macOS ignores args, and a Mac launch starts in the menu bar anyway.
+        app.setLoginItemSettings(
+          IS_MAC ? { openAtLogin: s.launchAtStartup } : { openAtLogin: s.launchAtStartup, args: ['--hidden'] },
+        );
+      }
     }
   });
 
@@ -396,6 +436,7 @@ function start(): void {
       bridge.send({ type: 'suspend', on });
     },
     openAccessibility: () => {
+      if (IS_LINUX) return; // macOS only: the Linux card has no such button
       systemPreferences.isTrustedAccessibilityClient(true); // adds lolPing to the list and shows the system prompt
       void shell.openExternal(ACCESSIBILITY_PANE);
       if (!trusted()) waitForAccess();
@@ -452,6 +493,7 @@ function start(): void {
     room.quit(); // says bye, so the others see "left" instead of waiting for a timeout
     transfer.stop();
     stopWaitingForAccess();
+    hypr?.stop();
     tray.destroy();
     overlays.destroy();
     void Promise.allSettled([bridge.stop(), store.flush(), lan.whenClosed(), relay.whenClosed()]).then(() => app.exit(0));
