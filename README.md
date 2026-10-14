@@ -132,7 +132,7 @@ Join a room and everyone in it sees your pings on their own screen, at the same 
 - Sharing a single window doesn't include the pings. Share your entire screen instead.
 - While lolPing is on, Ctrl + drag opens the emote wheel instead of copying files or text. Pick another emote key, or turn it off, in Settings → Emotes.
 - On a Mac, the wheel can't open while a secure screen is showing, such as the login window or a password prompt, and Accessibility has to be allowed again after each update.
-- On Linux, only Hyprland is supported, and only mice open the wheel: a touchpad doesn't. Keys aren't held back, so the pause shortcut and Esc also reach the app in front, and Caps Lock or a custom key can't be the trigger. The overlay may not show over fullscreen windows.
+- On Linux, only Hyprland is supported, and only mice open the wheel: a touchpad doesn't. Keys aren't held back, so the pause shortcut and Esc also reach the app in front, and Caps Lock or a custom key can't be the trigger.
 
 ## Build from source
 

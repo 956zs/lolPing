@@ -154,7 +154,6 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 - Hyprland only. Other Wayland compositors and X11 are not supported yet.
 - Touchpads are left alone, so a touchpad drag doesn't open the wheel. Use a mouse.
 - Keys are not swallowed: the toggle hotkey and Esc also reach the focused app, and Caps Lock or a custom key can't be the trigger.
-- The overlay probably doesn't show over a fullscreen window: Hyprland draws fullscreen windows above floating ones. To be checked.
 - The `input` group and `/dev/uinput` let a program read and send all input. That is the same access lolPing needs on every platform.
 - Single-window screen sharing doesn't include the pings.
 
@@ -168,3 +167,18 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 | Mouse grab | 14,580 events forwarded through uinput clones, 7.7 µs each on average. Alt + left press and release swallowed, the cursor kept moving, and clicks and drags were told apart. |
 | Cleanup | Clones disappeared and grabs were released when the process exited. |
 | Cursor IPC | `j/cursorpos` round trip 0.05–3 ms. |
+
+## 9. First run of the app (2026-10-14)
+
+`npm run dev` on the developer's machine, with the system's Electron 43 because Electron 44 was still downloading.
+
+| Check | Result |
+|---|---|
+| Overlay and settings window | The overlay rule placed `lolPing overlay eDP-1` floating and pinned over the whole monitor. The settings window floated, centred. |
+| Gestures | Alt + drag opened the wheel and placed pings with sound. Ctrl + drag opened the emote wheel. Normal mouse use and a plain Alt + click were unchanged. |
+| Tray and toggle | The tray icon showed in the end-4 bar. Ctrl+Alt+P paused and resumed. |
+| Fullscreen | The wheel and pings showed over a fullscreen Chrome window. |
+| Alt side effects | None seen in Chrome after an Alt gesture. |
+| Config reload | After `hyprctl reload` the overlay was floating and pinned again. |
+| Helper killed | The clones disappeared at once, so the pointer was free, and the helper was back with its grabs within 3 s. |
+| Not checked yet | Two monitors, fractional scaling, Firefox's menu bar, end-4's Super overview, the hyprlang fallback, the AppImage and open at login. |
