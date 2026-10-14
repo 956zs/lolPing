@@ -1,4 +1,4 @@
-// `node native/hook-helper/run.mjs build|test`: builds the hook helper (and runs its C++ tests) on Windows or macOS.
+// `node native/hook-helper/run.mjs build|test`: builds the hook helper (and runs its C++ tests) on Windows, macOS or Linux.
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -3,13 +3,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 
 #include "../src/commands.h"
 #include "../src/decision.h"
 #include "../src/json.h"
+#include "../src/linuxinput.h"
 #include "../src/macinput.h"
 #include "../src/output.h"
 
@@ -994,6 +997,288 @@ static void test_mac_option_drag_through_transitions() {
   CHECK(findEmit(r, Emit::Kind::WheelOpen) != nullptr);
 }
 
+static void test_linux_keycodes_map_to_vks() {
+  using namespace lnx;
+  CHECK(keyCodeToVk(kKeyA) == 'A');
+  CHECK(keyCodeToVk(25) == KEY_P);
+  CHECK(keyCodeToVk(2) == '1' && keyCodeToVk(11) == '0');
+  CHECK(keyCodeToVk(1) == ESC);
+  CHECK(keyCodeToVk(15) == TAB);
+  CHECK(keyCodeToVk(58) == CAPS);
+  CHECK(keyCodeToVk(59) == 0x70 && keyCodeToVk(88) == 0x7B);   // F1, F12
+  CHECK(keyCodeToVk(183) == 0x7C && keyCodeToVk(kKeyF24) == 0x87);  // F13, F24
+  CHECK(keyCodeToVk(105) == 0x25 && keyCodeToVk(108) == 0x28);  // left, down
+  CHECK(keyCodeToVk(28) == 0x0D && keyCodeToVk(96) == 0x0D);    // Enter and keypad Enter
+  CHECK(keyCodeToVk(82) == 0x60 && keyCodeToVk(98) == 0x6F);    // keypad 0, keypad /
+  CHECK(keyCodeToVk(39) == 0xBA && keyCodeToVk(41) == 0xC0);    // ; `
+  CHECK(keyCodeToVk(kKeyLeftAlt) == ALT && keyCodeToVk(100) == 0xA5);
+  CHECK(keyCodeToVk(29) == CTRL && keyCodeToVk(97) == 0xA3);
+  CHECK(keyCodeToVk(42) == 0xA0 && keyCodeToVk(54) == 0xA1);
+  CHECK(keyCodeToVk(125) == 0x5B && keyCodeToVk(126) == 0x5C);  // Super is Win
+  CHECK(keyCodeToVk(0) == 0);                                    // KEY_RESERVED
+  CHECK(keyCodeToVk(lnx::kBtnLeft) == 0);                        // buttons are not keys
+  CHECK(keyCodeToVk(0xFFFF) == 0);
+  // Every VK has one key, except Enter, which keypad Enter shares.
+  std::map<uint32_t, int> seen;
+  for (uint32_t code = 0; code <= 0x2FF; ++code) {
+    const uint32_t vk = keyCodeToVk(static_cast<uint16_t>(code));
+    if (vk != 0) ++seen[vk];
+  }
+  for (const auto& v : seen) CHECK(v.second == 1 || v.first == 0x0D);
+}
+
+static void test_linux_buttons_map_both_ways() {
+  using namespace lnx;
+  CHECK(buttonOf(kBtnLeft) == Btn::Left && buttonOf(kBtnRight) == Btn::Right && buttonOf(kBtnMiddle) == Btn::Middle);
+  CHECK(buttonOf(kBtnSide) == Btn::X1 && buttonOf(kBtnExtra) == Btn::X2);  // Mouse 4 and Mouse 5
+  CHECK(buttonOf(0x115) == Btn::None);  // BTN_FORWARD
+  CHECK(buttonOf(0) == Btn::None && buttonOf(kKeyA) == Btn::None);
+  for (const Btn b : {Btn::Left, Btn::Right, Btn::Middle, Btn::X1, Btn::X2}) CHECK(buttonOf(buttonCode(b)) == b);
+  CHECK(buttonCode(Btn::None) == 0);
+}
+
+static void test_linux_device_kind_from_caps() {
+  using namespace lnx;
+  DeviceCaps mouse;
+  mouse.relX = mouse.relY = mouse.btnLeft = true;
+  CHECK(deviceKind(mouse) == DeviceKind::Mouse);
+  DeviceCaps touchpad = mouse;
+  touchpad.abs = true;  // touchpads and tablets report absolute positions: left alone
+  CHECK(deviceKind(touchpad) == DeviceKind::Other);
+  DeviceCaps noButton = mouse;
+  noButton.btnLeft = false;
+  CHECK(deviceKind(noButton) == DeviceKind::Other);
+  DeviceCaps oneAxis = mouse;
+  oneAxis.relY = false;
+  CHECK(deviceKind(oneAxis) == DeviceKind::Other);
+  DeviceCaps letters;
+  letters.keyA = true;
+  CHECK(deviceKind(letters) == DeviceKind::Keyboard);
+  DeviceCaps modifiersOnly;
+  modifiersOnly.keyLeftAlt = true;
+  CHECK(deviceKind(modifiersOnly) == DeviceKind::Keyboard);
+  DeviceCaps absKeyboard = letters;
+  absKeyboard.abs = true;
+  CHECK(deviceKind(absKeyboard) == DeviceKind::Keyboard);
+  DeviceCaps combo = mouse;  // a mouse node that also has keys is grabbed as a mouse
+  combo.keyA = true;
+  CHECK(deviceKind(combo) == DeviceKind::Mouse);
+  CHECK(deviceKind(DeviceCaps{}) == DeviceKind::Other);
+}
+
+static void test_linux_virtual_devices_by_sysfs_path() {
+  using namespace lnx;
+  CHECK(isVirtualDevice("/sys/devices/virtual/input/input42/event17"));
+  CHECK(!isVirtualDevice("/sys/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/0003:046D:C52B.0001/input/input5/event5"));
+  CHECK(!isVirtualDevice("/sys/devices/platform/i8042/serio0/input/input3/event3"));
+  CHECK(!isVirtualDevice(""));
+  CHECK(!isVirtualDevice("/sys/devices/virtual"));
+  CHECK(!isVirtualDevice("/sys/devices/virtualx/input/input1/event1"));
+  CHECK(!isVirtualDevice("devices/virtual/input/input1/event1"));
+}
+
+static void test_linux_key_union_holds_a_key_while_any_keyboard_does() {
+  using namespace lnx;
+  KeyUnion k;
+  auto t = k.onKey(1, kKeyLeftAlt, 1);
+  CHECK(t.size() == 1 && t[0].vk == ALT && t[0].down);
+  CHECK(k.onKey(2, kKeyLeftAlt, 1).empty());  // the second keyboard's Alt: already down
+  CHECK(k.onKey(1, kKeyLeftAlt, 0).empty());  // still held on keyboard 2
+  CHECK(k.isDown(ALT));
+  t = k.onKey(2, kKeyLeftAlt, 0);
+  CHECK(t.size() == 1 && t[0].vk == ALT && !t[0].down);
+  CHECK(!k.isDown(ALT));
+  t = k.onKey(1, 100, 1);  // right Alt is its own VK
+  CHECK(t.size() == 1 && t[0].vk == 0xA5 && t[0].down && !k.isDown(ALT));
+}
+
+static void test_linux_key_union_repeats_and_strays() {
+  using namespace lnx;
+  KeyUnion k;
+  k.onKey(1, kKeyA, 1);
+  auto t = k.onKey(1, kKeyA, 2);  // auto-repeat: a key-down again, as on Windows
+  CHECK(t.size() == 1 && t[0].vk == 'A' && t[0].down);
+  t = k.onKey(2, 48, 2);  // a repeat whose press was never seen counts as the press
+  CHECK(t.size() == 1 && t[0].vk == 'B' && t[0].down);
+  CHECK(k.onKey(2, kKeyA, 2).empty());  // keyboard 2's first sight of a key keyboard 1 holds
+  CHECK(k.onKey(3, 31, 0).empty());  // an up for a key nobody holds
+  CHECK(k.onKey(1, lnx::kBtnLeft, 1).empty());  // no VK
+  CHECK(k.onKey(1, 0x2FF, 1).empty());
+  // Enter and keypad Enter share a VK: it goes up with the last of them.
+  KeyUnion e;
+  CHECK(e.onKey(1, 28, 1).size() == 1);
+  CHECK(e.onKey(1, 96, 1).empty());
+  CHECK(e.onKey(1, 28, 0).empty());
+  t = e.onKey(1, 96, 0);
+  CHECK(t.size() == 1 && t[0].vk == 0x0D && !t[0].down);
+}
+
+static void test_linux_key_union_set_held() {
+  using namespace lnx;
+  KeyUnion k;
+  auto t = k.setHeld(1, {kKeyLeftAlt, kKeyA, lnx::kBtnLeft});  // buttons are ignored
+  CHECK(t.size() == 2 && t[0].down && t[1].down && k.isDown(ALT) && k.isDown('A'));
+  t = k.setHeld(1, {kKeyA, 29});  // resync: Alt went up, Ctrl went down; ups come first
+  CHECK(t.size() == 2 && t[0].vk == ALT && !t[0].down && t[1].vk == CTRL && t[1].down);
+  k.onKey(2, 29, 1);
+  t = k.setHeld(1, {});  // keyboard 1 unplugged: Ctrl stays down for keyboard 2
+  CHECK(t.size() == 1 && t[0].vk == 'A' && !t[0].down && k.isDown(CTRL));
+  CHECK(k.setHeld(1, {}).empty());
+  CHECK(k.setHeld(3, {}).empty());  // a device that never held anything
+}
+
+static void test_linux_key_union_drives_decision() {
+  // Alt from the keyboard, a drag from the mouse: the wheel opens. The keyboard vanishing releases Alt.
+  using namespace lnx;
+  KeyUnion keys;
+  Decision d;
+  d.setMaskMenuKeys(false);
+  for (const auto& t : keys.onKey(7, kKeyLeftAlt, 1)) d.onEvent(t.down ? kd(t.vk) : ku(t.vk));
+  CHECK(d.onEvent(md(Btn::Left, 0, 0)).swallow);
+  CHECK(findEmit(d.onEvent(mv(20, 0)), Emit::Kind::WheelOpen) != nullptr);
+  d.onEvent(mu(Btn::Left, 20, 0));
+  for (const auto& t : keys.setHeld(7, {})) d.onEvent(t.down ? kd(t.vk) : ku(t.vk));
+  CHECK(!d.onEvent(md(Btn::Left, 0, 0)).swallow);  // Alt is up: a plain click
+  d.onEvent(mu(Btn::Left, 0, 0));
+  // A key Decision missed going up is cleared by a sync against the union.
+  d.onEvent(kd(ALT));
+  d.syncKeyStates([&](uint32_t vk) { return keys.isDown(vk); });
+  CHECK(!d.onEvent(md(Btn::Left, 0, 0)).swallow);
+}
+
+static void test_linux_mask_tap_after_swallowed_press_under_alt_or_super() {
+  using namespace lnx;
+  KeyUnion keys;
+  const InputEvent down = md(Btn::Left, 0, 0);
+  CHECK(!shouldTapMask(down, true, keys));  // nothing held
+  keys.onKey(1, kKeyLeftAlt, 1);
+  CHECK(shouldTapMask(down, true, keys));
+  CHECK(!shouldTapMask(down, false, keys));  // passed through: the app saw Alt+click, so no lone tap
+  CHECK(!shouldTapMask(mu(Btn::Left, 0, 0), true, keys));
+  CHECK(!shouldTapMask(kd('A'), true, keys));
+  keys.onKey(1, kKeyLeftAlt, 0);
+  keys.onKey(1, 100, 1);  // right Alt
+  CHECK(shouldTapMask(down, true, keys));
+  keys.onKey(1, 100, 0);
+  keys.onKey(1, 125, 1);  // Super
+  CHECK(shouldTapMask(md(Btn::X1, 0, 0), true, keys));
+  keys.onKey(1, 125, 0);
+  keys.onKey(1, 126, 1);
+  CHECK(shouldTapMask(down, true, keys));
+  keys.onKey(1, 126, 0);
+  keys.onKey(1, 29, 1);  // Ctrl has no lone-tap action
+  keys.onKey(1, 42, 1);
+  CHECK(!shouldTapMask(down, true, keys));
+}
+
+static void test_linux_parse_cursor_pos() {
+  using namespace lnx;
+  int x = 0, y = 0;
+  CHECK(parseCursorPos("{\n    \"x\": 4467,\n    \"y\": 885\n}\n", x, y) && x == 4467 && y == 885);
+  CHECK(parseCursorPos(R"({"y":2,"x":1})", x, y) && x == 1 && y == 2);
+  CHECK(parseCursorPos(R"({"x": -1920, "y": 0})", x, y) && x == -1920 && y == 0);  // a monitor left of the origin
+  CHECK(parseCursorPos(R"({"x": 12.6, "y": -3.5})", x, y) && x == 13 && y == -4);
+  x = 5;
+  y = 6;
+  CHECK(!parseCursorPos("", x, y));
+  CHECK(!parseCursorPos("unknown request", x, y));
+  CHECK(!parseCursorPos(R"({"x": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": "a", "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": 1e3, "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": 0x10, "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": inf, "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": 1., "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": -, "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": 12345678901, "y": 1})", x, y));
+  CHECK(!parseCursorPos(R"({"x": {"a": 1}, "y": 1})", x, y));
+  CHECK(x == 5 && y == 6);  // a failed parse leaves the outputs alone
+}
+
+namespace {
+// A compositor that answers with the given positions, one per query, then stops answering.
+struct FakeCursor {
+  std::deque<std::pair<int, int>> answers;
+  int queries = 0;
+  lnx::CursorEmits::Query query() {
+    return [this](int& x, int& y) {
+      ++queries;
+      if (answers.empty()) return false;
+      x = answers.front().first;
+      y = answers.front().second;
+      answers.pop_front();
+      return true;
+    };
+  }
+};
+Emit pointEmit(Emit::Kind k, int x, int y, WheelKind w = WheelKind::Ping) {
+  Emit e{k};
+  e.x = x;
+  e.y = y;
+  e.wheel = w;
+  return e;
+}
+}  // namespace
+
+static void test_linux_cursor_emits_place_a_wheel_gesture() {
+  FakeCursor c;
+  c.answers = {{500, 300}, {510, 300}, {510, 300}, {520, 305}, {530, 310}};
+  lnx::CursorEmits p(c.query());
+  CHECK(!p.open() && !p.onPoll().has_value() && c.queries == 0);  // no polling while no wheel is open
+  p.onPress();  // the swallowed press, at (500, 300) on screen
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 7, 8));  // Decision's own coordinates are a motion sum
+  CHECK(e && e->kind == Emit::Kind::WheelOpen && e->x == 500 && e->y == 300 && p.open());
+  CHECK(!p.onEmit(pointEmit(Emit::Kind::WheelMove, 30, 8)).has_value());  // dropped: polls send real moves
+  e = p.onPoll();
+  CHECK(e && e->kind == Emit::Kind::WheelMove && e->x == 510 && e->y == 300 && e->wheel == WheelKind::Ping);
+  CHECK(!p.onPoll().has_value());  // unchanged: nothing sent
+  e = p.onPoll();
+  CHECK(e && e->x == 520 && e->y == 305);
+  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 40, 9));  // asks again at the release
+  CHECK(e && e->kind == Emit::Kind::WheelRelease && e->x == 530 && e->y == 310 && !p.open());
+  const int before = c.queries;
+  CHECK(!p.onPoll().has_value() && c.queries == before);
+}
+
+static void test_linux_cursor_emits_click_cancel_and_toggle() {
+  FakeCursor c;
+  c.answers = {{40, 50}, {60, 70}};
+  lnx::CursorEmits p(c.query());
+  p.onPress();
+  auto e = p.onEmit(pointEmit(Emit::Kind::Click, 1, 2, WheelKind::Emote));
+  CHECK(e && e->kind == Emit::Kind::Click && e->x == 40 && e->y == 50 && e->wheel == WheelKind::Emote && !p.open());
+  p.onPress();
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
+  CHECK(p.open());
+  e = p.onEmit(Emit{Emit::Kind::Cancel});
+  CHECK(e && e->kind == Emit::Kind::Cancel && !p.open());
+  Emit toggled{Emit::Kind::Toggled};
+  toggled.enabled = true;
+  e = p.onEmit(toggled);
+  CHECK(e && e->kind == Emit::Kind::Toggled && e->enabled);
+  CHECK(c.queries == 2);  // only the presses asked
+}
+
+static void test_linux_cursor_emits_survive_a_silent_compositor() {
+  FakeCursor c;
+  c.answers = {{100, 200}, {110, 205}};
+  lnx::CursorEmits p(c.query());
+  p.onPress();
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
+  auto e = p.onPoll();
+  CHECK(e && e->x == 110 && e->wheel == WheelKind::Emote);
+  CHECK(!p.onPoll().has_value());  // no answer: nothing to send
+  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0, WheelKind::Emote));
+  CHECK(e && e->x == 110 && e->y == 205);  // the last answer
+  p.onPress();  // still silent: the last answer again
+  e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
+  CHECK(e && e->x == 110 && e->y == 205);
+  lnx::CursorEmits none(nullptr);  // no compositor at all
+  none.onPress();
+  e = none.onEmit(pointEmit(Emit::Kind::WheelOpen, 3, 4));
+  CHECK(e && e->x == 0 && e->y == 0);
+  CHECK(!none.onPoll().has_value());
+}
+
 int main() {
   test_json_parses_flat_objects();
   test_json_rejects_bad_input();
@@ -1059,6 +1344,19 @@ int main() {
   test_mac_modifier_held();
   test_mac_modifier_transitions();
   test_mac_option_drag_through_transitions();
+  test_linux_keycodes_map_to_vks();
+  test_linux_buttons_map_both_ways();
+  test_linux_device_kind_from_caps();
+  test_linux_virtual_devices_by_sysfs_path();
+  test_linux_key_union_holds_a_key_while_any_keyboard_does();
+  test_linux_key_union_repeats_and_strays();
+  test_linux_key_union_set_held();
+  test_linux_key_union_drives_decision();
+  test_linux_mask_tap_after_swallowed_press_under_alt_or_super();
+  test_linux_parse_cursor_pos();
+  test_linux_cursor_emits_place_a_wheel_gesture();
+  test_linux_cursor_emits_click_cancel_and_toggle();
+  test_linux_cursor_emits_survive_a_silent_compositor();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
