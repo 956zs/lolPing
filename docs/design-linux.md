@@ -32,10 +32,10 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 ### 2.1 Devices
 
 - The helper opens every `/dev/input/event*` and sorts it with libevdev:
-  - Mouse: `REL_X`, `REL_Y` and `BTN_LEFT`, no `EV_ABS`.
+  - Mouse: `REL_X`, `REL_Y` and `BTN_LEFT`, and not an absolute pointer (`ABS_X` or `ABS_MT_POSITION_X`). Other axes, such as the `ABS_MISC` or `ABS_VOLUME` some gaming mice put on their pointer node, don't count.
   - Keyboard: has letter keys (`KEY_A`) or modifier keys (`KEY_LEFTALT`).
-  - Anything else, touchpads included, is closed again.
-- Virtual devices are skipped: those whose sysfs node (`/sys/class/input/eventN`) resolves under `/devices/virtual/`. That covers the helper's own clones, `ydotoold` and Sunshine. Checking `BUS_VIRTUAL` is not enough: Sunshine's "Mouse passthrough" reports a real bus.
+  - Anything else, touchpads, tablets and touchscreens included, is closed again.
+- uinput devices are skipped: those whose sysfs node (`/sys/class/input/eventN`) resolves under `/sys/devices/virtual/input/`. That covers the helper's own clones, `ydotoold` and Sunshine. Checking `BUS_VIRTUAL` is not enough: Sunshine's "Mouse passthrough" reports a real bus. Bluetooth LE mice and keyboards come through uhid, elsewhere under `/sys/devices/virtual/`, and are kept. A node whose sysfs entry can't be read is skipped, so the helper never grabs its own clone.
 - Hotplug: an inotify watch on `/dev/input` (`IN_CREATE`, and `IN_ATTRIB` because udev sets the permissions after the node appears). A read that fails with `ENODEV` drops the device.
 
 ### 2.2 Mice: grab and forward
@@ -47,6 +47,7 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 - The clone comes first and the grab 250 ms later, once the compositor has opened the clone, so no event is lost in between.
 - A mouse is grabbed only when none of its buttons is held. Until then the helper watches it without a grab, so libinput never misses a release.
 - **Paused:** the helper drops its grabs and destroys the clones. A paused lolPing is not in the input path at all. During key capture (`suspend`) the grabs stay and Decision passes everything through.
+- Button releases on a mouse that isn't grabbed still reach Decision, with nothing swallowed or replayed. A gesture cut short by a pause waits for its release, and other trigger buttons would stay blocked until it came.
 - **Exit** (stdin EOF, `shutdown`, crash): the kernel drops a grab when its file closes, and the clones disappear with the process. The spike checked this.
 - Buttons map as `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE`, `BTN_SIDE` → X1 (Mouse 4), `BTN_EXTRA` → X2 (Mouse 5).
 
@@ -72,12 +73,14 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
 
 - evdev only reports relative motion. Screen positions come from Hyprland's socket `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock` with the request `j/cursorpos`. They are global layout coordinates, the same space as Electron's DIPs, as on macOS.
 - A round trip takes 0.05–3 ms. That is too slow for the event path: in the spike one forwarded event waited 2 ms. So the work is split:
-  - The event thread feeds Decision a position summed from the raw motion. Only the drag threshold uses it.
   - A cursor thread owns the socket. Decision's emits reach it in order, and it fills in real positions before writing them out:
     - Wheel open and click use the position from the press.
     - Wheel release uses a query made at the release.
-    - While a gesture is open, it polls every 8 ms and sends `wheelMove` when the position changed. Decision's per-event moves are dropped.
-- If `HYPRLAND_INSTANCE_SIGNATURE` is unset or the socket doesn't answer, the helper prints `{"type":"error","code":"noHyprland",…}` and exits with code 3, like a missing permission (§2.7).
+    - While a wheel is open, it polls every 8 ms and sends `wheelMove` when the position changed. Decision's per-event moves are dropped.
+  - The drag threshold is in screen pixels, as on Windows and macOS. Raw motion is in device counts, which depend on DPI and acceleration: on a 16,000 DPI mouse a jittery Alt + click would open the wheel. So the event thread feeds Decision every mouse event at (0, 0), and raw motion never opens a wheel.
+  - While a press is pending, the cursor thread polls every 8 ms. Once the cursor is more than `dragThresholdPx` from the press, it wakes the event loop through an eventfd. If that press is still pending, the event loop feeds Decision one move just past the threshold, and the wheel opens. That costs one poll interval plus a round trip: about 4 ms on average, about 14 ms at worst with a slow 3 ms round trip.
+  - A press released before the cursor thread has noticed the drag counts as a click.
+- If `HYPRLAND_INSTANCE_SIGNATURE` or `XDG_RUNTIME_DIR` is unset, the helper prints `{"type":"error","code":"noHyprland",…}` and exits with code 3, like a missing permission (§2.7). If they are set but the socket doesn't answer, it asks again every 250 ms for up to 10 s first: started at login, it can come up before Hyprland answers.
 - `gameCheck` has no fullscreen probe on Linux, as on macOS.
 
 ### 2.6 Watchdog
@@ -106,10 +109,11 @@ The helper stays one C++ program. `decision.cpp`, `commands`, `json`, `output`, 
   - Rules added at runtime are lost when Hyprland reloads its config. Main listens on `.socket2.sock` for `configreloaded`, adds them again and remakes the overlays (pings on screen at that moment disappear). If adding a rule keeps causing a reload, it stops after a few rounds. `monitoradded` and `monitorremoved` also trigger a rebuild.
   - Whether the config is Lua or hyprlang comes from `hyprctl -j status` (`configProvider`).
   - A display without a Hyprland monitor or without its rule gets no overlay, because Hyprland would tile it.
+  - An overlay is only replaced once the rule for its replacement is in. When hyprctl gives no monitors or a rule can't be added, the windows there are stay, and main tries again after 1 s, 2 s, then every 5 s until every display has its overlay.
   - Coordinate maps use `phys = dip` and `scale = 1`, as on macOS.
-- **Settings window:** an opaque Fluent background (Mica is Windows-only) with Electron's caption buttons (`titleBarOverlay`). A Hyprland rule floats it and centres it.
+- **Settings window:** an opaque Fluent background (Mica is Windows-only) with Electron's caption buttons (`titleBarOverlay`). A Hyprland rule floats it and centres it. If adding the rule fails, it is tried again the same way as the overlays' rules.
 - **Tray:** Electron's `Tray` is a StatusNotifierItem on Linux, and the end4 bar shows it. It uses a plain PNG; off is dimmed.
-- **Startup:** `setLoginItemSettings` does nothing on Linux. "Open at login" writes or removes `~/.config/autostart/lolping.desktop` with `--hidden`. Hyprland only runs those entries when the session starts through uwsm or a similar tool, so the setting's description says so and the README shows the `exec-once` line.
+- **Startup:** `setLoginItemSettings` does nothing on Linux. "Open at login" writes or removes `~/.config/autostart/lolping.desktop` with `--hidden`. The entry holds the AppImage's path, which changes when a newer AppImage replaces the old one, so with the setting on, each start writes the entry again if it differs. Hyprland only runs those entries when the session starts through uwsm or a similar tool, so the setting's description says so and the README shows the `exec-once` line.
 - **Updates:** `updater` is `null` on Linux. There is no update card and no GitHub traffic.
 - **Rooms, emotes, LAN and relays** stay as they are.
 

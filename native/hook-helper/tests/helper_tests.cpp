@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -1037,42 +1038,56 @@ static void test_linux_buttons_map_both_ways() {
   CHECK(buttonCode(Btn::None) == 0);
 }
 
+namespace {
+// The caps of a device that reports exactly these (type, code) pairs.
+lnx::DeviceCaps capsOf(std::initializer_list<std::pair<uint16_t, uint16_t>> codes) {
+  return lnx::readCaps([codes](uint16_t type, uint16_t code) {
+    for (const auto& c : codes) {
+      if (c.first == type && c.second == code) return true;
+    }
+    return false;
+  });
+}
+constexpr uint16_t ABS_Y = 0x01, ABS_VOLUME = 0x20, ABS_MISC = 0x28, REL_WHEEL = 0x08;
+}  // namespace
+
 static void test_linux_device_kind_from_caps() {
   using namespace lnx;
-  DeviceCaps mouse;
-  mouse.relX = mouse.relY = mouse.btnLeft = true;
-  CHECK(deviceKind(mouse) == DeviceKind::Mouse);
-  DeviceCaps touchpad = mouse;
-  touchpad.abs = true;  // touchpads and tablets report absolute positions: left alone
-  CHECK(deviceKind(touchpad) == DeviceKind::Other);
-  DeviceCaps noButton = mouse;
-  noButton.btnLeft = false;
-  CHECK(deviceKind(noButton) == DeviceKind::Other);
-  DeviceCaps oneAxis = mouse;
-  oneAxis.relY = false;
-  CHECK(deviceKind(oneAxis) == DeviceKind::Other);
-  DeviceCaps letters;
-  letters.keyA = true;
-  CHECK(deviceKind(letters) == DeviceKind::Keyboard);
-  DeviceCaps modifiersOnly;
-  modifiersOnly.keyLeftAlt = true;
-  CHECK(deviceKind(modifiersOnly) == DeviceKind::Keyboard);
-  DeviceCaps absKeyboard = letters;
-  absKeyboard.abs = true;
-  CHECK(deviceKind(absKeyboard) == DeviceKind::Keyboard);
-  DeviceCaps combo = mouse;  // a mouse node that also has keys is grabbed as a mouse
-  combo.keyA = true;
-  CHECK(deviceKind(combo) == DeviceKind::Mouse);
+  const std::pair<uint16_t, uint16_t> relX{kEvRel, kRelX}, relY{kEvRel, kRelY}, left{kEvKey, kBtnLeft};
+  CHECK(deviceKind(capsOf({relX, relY, left})) == DeviceKind::Mouse);
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvRel, REL_WHEEL}, {kEvKey, kBtnSide}})) == DeviceKind::Mouse);
+  // Gaming mice and receivers that put a non-pointer axis on the pointer node are still mice.
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvAbs, ABS_MISC}})) == DeviceKind::Mouse);
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvAbs, ABS_VOLUME}})) == DeviceKind::Mouse);
+  CHECK(!capsOf({{kEvAbs, ABS_MISC}, {kEvAbs, ABS_Y}}).absPointer);
+  // Absolute pointers are left alone, even when they also report relative motion.
+  CHECK(deviceKind(capsOf({left, {kEvAbs, kAbsX}, {kEvAbs, ABS_Y}, {kEvAbs, kAbsMtPositionX}})) == DeviceKind::Other);
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvAbs, kAbsX}})) == DeviceKind::Other);
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvAbs, kAbsMtPositionX}})) == DeviceKind::Other);
+  CHECK(deviceKind(capsOf({relX, relY})) == DeviceKind::Other);  // no button
+  CHECK(deviceKind(capsOf({relX, left})) == DeviceKind::Other);  // one axis
+  CHECK(deviceKind(capsOf({{kEvKey, kKeyA}})) == DeviceKind::Keyboard);
+  CHECK(deviceKind(capsOf({{kEvKey, kKeyLeftAlt}})) == DeviceKind::Keyboard);
+  CHECK(deviceKind(capsOf({{kEvKey, kKeyA}, {kEvAbs, ABS_VOLUME}})) == DeviceKind::Keyboard);
+  CHECK(deviceKind(capsOf({{kEvKey, kKeyA}, {kEvAbs, kAbsX}})) == DeviceKind::Keyboard);
+  // A mouse node that also has keys is grabbed as a mouse.
+  CHECK(deviceKind(capsOf({relX, relY, left, {kEvKey, kKeyA}})) == DeviceKind::Mouse);
+  CHECK(deviceKind(capsOf({{kEvKey, kKeyA}})) == DeviceKind::Keyboard);
+  CHECK(deviceKind(capsOf({})) == DeviceKind::Other);
   CHECK(deviceKind(DeviceCaps{}) == DeviceKind::Other);
+  // Codes of the wrong type don't count: REL_X's number as a key, BTN_LEFT's as an axis.
+  CHECK(deviceKind(capsOf({{kEvKey, kRelX}, {kEvKey, kRelY}, {kEvRel, kBtnLeft}})) == DeviceKind::Other);
 }
 
 static void test_linux_virtual_devices_by_sysfs_path() {
   using namespace lnx;
-  CHECK(isVirtualDevice("/sys/devices/virtual/input/input42/event17"));
+  CHECK(isVirtualDevice("/sys/devices/virtual/input/input42/event17"));  // uinput: clones, ydotoold, Sunshine
+  CHECK(!isVirtualDevice("/sys/devices/virtual/misc/uhid/0005:046D:B023.0001/input/input30/event30"));  // BLE
   CHECK(!isVirtualDevice("/sys/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/0003:046D:C52B.0001/input/input5/event5"));
   CHECK(!isVirtualDevice("/sys/devices/platform/i8042/serio0/input/input3/event3"));
   CHECK(!isVirtualDevice(""));
-  CHECK(!isVirtualDevice("/sys/devices/virtual"));
+  CHECK(!isVirtualDevice("/sys/devices/virtual/input"));
+  CHECK(!isVirtualDevice("/sys/devices/virtual/inputs/input1/event1"));
   CHECK(!isVirtualDevice("/sys/devices/virtualx/input/input1/event1"));
   CHECK(!isVirtualDevice("devices/virtual/input/input1/event1"));
 }
@@ -1219,34 +1234,160 @@ Emit pointEmit(Emit::Kind k, int x, int y, WheelKind w = WheelKind::Ping) {
 }
 }  // namespace
 
+static void test_linux_moved_past_threshold() {
+  using lnx::movedPastThreshold;
+  CHECK(!movedPastThreshold(100, 100, 108, 100, 8));  // exactly the threshold: not yet, as in Decision
+  CHECK(movedPastThreshold(100, 100, 109, 100, 8));
+  CHECK(movedPastThreshold(100, 100, 100, 91, 8));
+  CHECK(movedPastThreshold(100, 100, 106, 106, 8));   // 8.5 px on the diagonal
+  CHECK(!movedPastThreshold(100, 100, 95, 106, 8));   // 7.8 px
+  CHECK(movedPastThreshold(-1920, 0, -1930, 0, 8));   // a monitor left of the origin
+  CHECK(!movedPastThreshold(5, 5, 5, 5, 0));
+  CHECK(movedPastThreshold(5, 5, 6, 5, 0));
+}
+
+static void test_linux_pending_press_reports_a_drag_once() {
+  FakeCursor c;
+  c.answers = {{100, 100}, {104, 104}, {109, 100}, {200, 200}};
+  lnx::CursorEmits p(c.query());
+  CHECK(!p.polling() && !p.onPoll().dragged && c.queries == 0);  // nothing to watch: no queries
+  p.onPress(8);  // at (100, 100)
+  CHECK(p.polling() && !p.open());
+  lnx::CursorEmits::Poll poll = p.onPoll();
+  CHECK(!poll.dragged && !poll.move);  // 5.7 px: still a click
+  poll = p.onPoll();
+  CHECK(poll.dragged && !poll.move);  // 9 px
+  CHECK(!p.polling());                // once: the wheel's open or the press's end comes next
+  const int before = c.queries;
+  CHECK(!p.onPoll().dragged && c.queries == before);
+  // Decision's open emit arrives: placed at the press, not where the drag was noticed.
+  const auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  CHECK(e && e->x == 100 && e->y == 100 && p.open() && p.polling());
+  poll = p.onPoll();
+  CHECK(!poll.dragged && poll.move && poll.move->x == 200 && poll.move->y == 200);
+}
+
+static void test_linux_pending_press_stops_with_click_end_or_cancel() {
+  FakeCursor c;
+  c.answers = {{10, 10}, {10, 10}, {20, 20}, {30, 30}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);
+  CHECK(!p.onPoll().dragged);
+  p.onPressEnded();  // a replayed click: Decision went idle without an emit
+  CHECK(!p.polling());
+  int before = c.queries;
+  CHECK(!p.onPoll().dragged && c.queries == before);
+  p.onPress(8);  // at (20, 20)
+  const auto e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
+  CHECK(e && e->x == 20 && e->y == 20 && !p.polling());
+  p.onPress(8);  // at (30, 30)
+  p.onEmit(Emit{Emit::Kind::Cancel});
+  before = c.queries;
+  CHECK(!p.polling() && !p.onPoll().dragged && c.queries == before);
+}
+
+static void test_linux_pending_press_measures_from_the_first_answer() {
+  // The compositor didn't answer at the press: the first answer becomes the press, not a jump from the last one.
+  FakeCursor c;
+  c.answers = {{0, 0}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);  // answered: (0, 0)
+  p.onPressEnded();
+  c.answers = {};
+  p.onPress(8);  // no answer
+  c.answers = {{500, 500}, {505, 500}, {520, 500}};
+  CHECK(!p.onPoll().dragged);  // 707 px from the old answer, but this is the baseline now
+  CHECK(!p.onPoll().dragged);
+  CHECK(p.onPoll().dragged);
+  const auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  CHECK(e && e->x == 500 && e->y == 500);
+}
+
+static void test_linux_threshold_move_opens_the_wheel() {
+  // The event loop feeds Decision every mouse event at (0, 0) and pastThresholdMove() once the cursor thread
+  // reports a drag: raw motion alone never opens a wheel, that move always does.
+  for (const int threshold : {1, 8, 40}) {
+    Config c;
+    c.dragThresholdPx = threshold;
+    Decision d;
+    d.setMaskMenuKeys(false);
+    d.setConfig(c);
+    d.onEvent(kd(ALT));
+    CHECK(d.onEvent(md(Btn::Left, 0, 0)).swallow);
+    for (int i = 0; i < 50; ++i) d.onEvent(mv(0, 0));
+    CHECK(d.state() == S::Pending);
+    const Result r = d.onEvent(lnx::pastThresholdMove(threshold, 7));
+    CHECK(d.state() == S::Wheel && findEmit(r, Emit::Kind::WheelOpen) != nullptr);
+  }
+}
+
+static void test_linux_ungrabbed_release_ends_a_paused_gesture() {
+  // Pings on Alt, emotes on Mouse 4. A pause mid-gesture ungrabs the mouse, so its left release comes through the
+  // ungrabbed path. Without it, Decision waits in SwallowUp and the Mouse 4 trigger stays blocked.
+  Config c;
+  c.emoteTrigger = Trigger::Mouse4;
+  Decision blocked;
+  blocked.setConfig(c);
+  blocked.onEvent(kd(ALT));
+  CHECK(blocked.onEvent(md(Btn::Left, 0, 0)).swallow);
+  blocked.setEnabled(false);
+  blocked.setEnabled(true);
+  blocked.onEvent(ku(ALT));
+  CHECK(!blocked.onEvent(md(Btn::X1, 0, 0)).swallow);  // the release never came
+  Decision d;
+  d.setConfig(c);
+  d.onEvent(kd(ALT));
+  d.onEvent(md(Btn::Left, 0, 0));
+  d.setEnabled(false);
+  const Result r = lnx::ungrabbedRelease(d, Btn::Left, 5);
+  CHECK(!r.swallow && r.injects.empty() && r.emits.empty() && d.state() == S::Idle);
+  d.setEnabled(true);
+  d.onEvent(ku(ALT));
+  CHECK(d.onEvent(md(Btn::X1, 0, 0)).swallow && d.state() == S::Pending);
+}
+
+static void test_linux_ungrabbed_release_never_replays() {
+  // A press Decision holds, released on a mouse that isn't grabbed: that release already reached the app, so the
+  // click is not replayed, but a wheel still closes with its release.
+  Decision d;
+  d.onEvent(kd(ALT));
+  d.onEvent(md(Btn::Left, 0, 0));
+  Result r = lnx::ungrabbedRelease(d, Btn::Left, 1);
+  CHECK(!r.swallow && r.injects.empty() && d.state() == S::Idle);
+  openWheel(d);
+  r = lnx::ungrabbedRelease(d, Btn::Left, 2);
+  CHECK(findEmit(r, Emit::Kind::WheelRelease) != nullptr && d.state() == S::Idle);
+  CHECK(lnx::ungrabbedRelease(d, Btn::Right, 3).emits.empty());  // nothing going on: nothing happens
+}
+
 static void test_linux_cursor_emits_place_a_wheel_gesture() {
   FakeCursor c;
   c.answers = {{500, 300}, {510, 300}, {510, 300}, {520, 305}, {530, 310}};
   lnx::CursorEmits p(c.query());
-  CHECK(!p.open() && !p.onPoll().has_value() && c.queries == 0);  // no polling while no wheel is open
-  p.onPress();  // the swallowed press, at (500, 300) on screen
-  auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 7, 8));  // Decision's own coordinates are a motion sum
+  CHECK(!p.open() && !p.onPoll().move && c.queries == 0);  // no polling while nothing is pending or open
+  p.onPress(8);  // the swallowed press, at (500, 300) on screen
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 7, 8));  // Decision's own coordinates mean nothing here
   CHECK(e && e->kind == Emit::Kind::WheelOpen && e->x == 500 && e->y == 300 && p.open());
   CHECK(!p.onEmit(pointEmit(Emit::Kind::WheelMove, 30, 8)).has_value());  // dropped: polls send real moves
-  e = p.onPoll();
-  CHECK(e && e->kind == Emit::Kind::WheelMove && e->x == 510 && e->y == 300 && e->wheel == WheelKind::Ping);
-  CHECK(!p.onPoll().has_value());  // unchanged: nothing sent
-  e = p.onPoll();
-  CHECK(e && e->x == 520 && e->y == 305);
+  auto m = p.onPoll().move;
+  CHECK(m && m->kind == Emit::Kind::WheelMove && m->x == 510 && m->y == 300 && m->wheel == WheelKind::Ping);
+  CHECK(!p.onPoll().move);  // unchanged: nothing sent
+  m = p.onPoll().move;
+  CHECK(m && m->x == 520 && m->y == 305);
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 40, 9));  // asks again at the release
-  CHECK(e && e->kind == Emit::Kind::WheelRelease && e->x == 530 && e->y == 310 && !p.open());
+  CHECK(e && e->kind == Emit::Kind::WheelRelease && e->x == 530 && e->y == 310 && !p.open() && !p.polling());
   const int before = c.queries;
-  CHECK(!p.onPoll().has_value() && c.queries == before);
+  CHECK(!p.onPoll().move && c.queries == before);
 }
 
 static void test_linux_cursor_emits_click_cancel_and_toggle() {
   FakeCursor c;
   c.answers = {{40, 50}, {60, 70}};
   lnx::CursorEmits p(c.query());
-  p.onPress();
+  p.onPress(8);
   auto e = p.onEmit(pointEmit(Emit::Kind::Click, 1, 2, WheelKind::Emote));
   CHECK(e && e->kind == Emit::Kind::Click && e->x == 40 && e->y == 50 && e->wheel == WheelKind::Emote && !p.open());
-  p.onPress();
+  p.onPress(8);
   p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
   CHECK(p.open());
   e = p.onEmit(Emit{Emit::Kind::Cancel});
@@ -1262,21 +1403,22 @@ static void test_linux_cursor_emits_survive_a_silent_compositor() {
   FakeCursor c;
   c.answers = {{100, 200}, {110, 205}};
   lnx::CursorEmits p(c.query());
-  p.onPress();
+  p.onPress(8);
   p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
-  auto e = p.onPoll();
-  CHECK(e && e->x == 110 && e->wheel == WheelKind::Emote);
-  CHECK(!p.onPoll().has_value());  // no answer: nothing to send
-  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0, WheelKind::Emote));
+  const auto m = p.onPoll().move;
+  CHECK(m && m->x == 110 && m->wheel == WheelKind::Emote);
+  CHECK(!p.onPoll().move);  // no answer: nothing to send
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0, WheelKind::Emote));
   CHECK(e && e->x == 110 && e->y == 205);  // the last answer
-  p.onPress();  // still silent: the last answer again
+  p.onPress(8);  // still silent: the last answer again
   e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
   CHECK(e && e->x == 110 && e->y == 205);
   lnx::CursorEmits none(nullptr);  // no compositor at all
-  none.onPress();
+  none.onPress(8);
+  CHECK(!none.onPoll().dragged);
   e = none.onEmit(pointEmit(Emit::Kind::WheelOpen, 3, 4));
   CHECK(e && e->x == 0 && e->y == 0);
-  CHECK(!none.onPoll().has_value());
+  CHECK(!none.onPoll().move);
 }
 
 int main() {
@@ -1354,6 +1496,13 @@ int main() {
   test_linux_key_union_drives_decision();
   test_linux_mask_tap_after_swallowed_press_under_alt_or_super();
   test_linux_parse_cursor_pos();
+  test_linux_moved_past_threshold();
+  test_linux_pending_press_reports_a_drag_once();
+  test_linux_pending_press_stops_with_click_end_or_cancel();
+  test_linux_pending_press_measures_from_the_first_answer();
+  test_linux_threshold_move_opens_the_wheel();
+  test_linux_ungrabbed_release_ends_a_paused_gesture();
+  test_linux_ungrabbed_release_never_replays();
   test_linux_cursor_emits_place_a_wheel_gesture();
   test_linux_cursor_emits_click_cancel_and_toggle();
   test_linux_cursor_emits_survive_a_silent_compositor();

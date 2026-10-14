@@ -86,13 +86,24 @@ uint16_t buttonCode(Btn btn) {
   }
 }
 
+DeviceCaps readCaps(const HasCode& has) {
+  DeviceCaps c;
+  c.relX = has(kEvRel, kRelX);
+  c.relY = has(kEvRel, kRelY);
+  c.btnLeft = has(kEvKey, kBtnLeft);
+  c.absPointer = has(kEvAbs, kAbsX) || has(kEvAbs, kAbsMtPositionX);
+  c.keyA = has(kEvKey, kKeyA);
+  c.keyLeftAlt = has(kEvKey, kKeyLeftAlt);
+  return c;
+}
+
 DeviceKind deviceKind(const DeviceCaps& c) {
-  if (c.relX && c.relY && c.btnLeft && !c.abs) return DeviceKind::Mouse;
+  if (c.relX && c.relY && c.btnLeft && !c.absPointer) return DeviceKind::Mouse;
   if (c.keyA || c.keyLeftAlt) return DeviceKind::Keyboard;
   return DeviceKind::Other;
 }
 
-bool isVirtualDevice(const std::string& sysfsPath) { return sysfsPath.rfind("/sys/devices/virtual/", 0) == 0; }
+bool isVirtualDevice(const std::string& sysfsPath) { return sysfsPath.rfind("/sys/devices/virtual/input/", 0) == 0; }
 
 std::set<uint32_t> KeyUnion::downVks() const {
   std::set<uint32_t> vks;
@@ -163,23 +174,55 @@ bool parseCursorPos(const std::string& reply, int& x, int& y) {
   return true;
 }
 
-void CursorEmits::where(int& x, int& y) {
+bool movedPastThreshold(int fromX, int fromY, int x, int y, int thresholdPx) {
+  return std::hypot(static_cast<double>(x - fromX), static_cast<double>(y - fromY)) > thresholdPx;
+}
+
+InputEvent pastThresholdMove(int dragThresholdPx, uint64_t timeMs) {
+  InputEvent e;
+  e.kind = EvKind::MouseMove;
+  e.x = dragThresholdPx + 1;
+  e.timeMs = timeMs;
+  return e;
+}
+
+Result ungrabbedRelease(Decision& d, Btn btn, uint64_t timeMs) {
+  InputEvent e;
+  e.kind = EvKind::MouseUp;
+  e.btn = btn;
+  e.timeMs = timeMs;
+  Result r = d.onEvent(e);
+  r.swallow = false;
+  r.injects.clear();
+  return r;
+}
+
+bool CursorEmits::where(int& x, int& y) {
   int qx = 0;
   int qy = 0;
-  if (query_ && query_(qx, qy)) {
+  const bool answered = query_ && query_(qx, qy);
+  if (answered) {
     knownX_ = qx;
     knownY_ = qy;
   }
   x = knownX_;
   y = knownY_;
+  return answered;
 }
 
-void CursorEmits::onPress() { where(pressX_, pressY_); }
+void CursorEmits::onPress(int thresholdPx) {
+  pressKnown_ = where(pressX_, pressY_);
+  thresholdPx_ = thresholdPx;
+  pending_ = true;
+}
+
+void CursorEmits::onPressEnded() { pending_ = false; }
 
 std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
   Emit out = e;
   switch (e.kind) {
     case Emit::Kind::WheelOpen:
+      pending_ = false;
       open_ = true;
       wheel_ = e.wheel;
       out.x = pressX_;
@@ -188,6 +231,7 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
       sentY_ = pressY_;
       return out;
     case Emit::Kind::Click:
+      pending_ = false;
       out.x = pressX_;
       out.y = pressY_;
       return out;
@@ -198,6 +242,7 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
       where(out.x, out.y);
       return out;
     case Emit::Kind::Cancel:
+      pending_ = false;
       open_ = false;
       return out;
     case Emit::Kind::Toggled:
@@ -206,20 +251,33 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
   return out;
 }
 
-std::optional<Emit> CursorEmits::onPoll() {
+CursorEmits::Poll CursorEmits::onPoll() {
+  Poll p;
   int x = 0;
   int y = 0;
-  if (!open_ || !query_ || !query_(x, y)) return std::nullopt;
+  if (!polling() || !query_ || !query_(x, y)) return p;
   knownX_ = x;
   knownY_ = y;
-  if (x == sentX_ && y == sentY_) return std::nullopt;
+  if (pending_) {
+    if (!pressKnown_) {  // no answer at the press: measure from the first one
+      pressX_ = x;
+      pressY_ = y;
+      pressKnown_ = true;
+    } else if (movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_)) {
+      pending_ = false;  // once: the wheel's open emit or the press's end comes next
+      p.dragged = true;
+    }
+    return p;
+  }
+  if (x == sentX_ && y == sentY_) return p;
   sentX_ = x;
   sentY_ = y;
   Emit move{Emit::Kind::WheelMove};
   move.x = x;
   move.y = y;
   move.wheel = wheel_;
-  return move;
+  p.move = move;
+  return p;
 }
 
 }  // namespace lp::lnx

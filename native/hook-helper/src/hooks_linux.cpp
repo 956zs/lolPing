@@ -6,6 +6,7 @@
 #include <libevdev/libevdev.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -42,6 +43,8 @@ constexpr uint64_t kTickMs = 1000;
 // A new clone is ignored until the compositor has opened it: grabbing first would lose the events in between.
 constexpr uint64_t kCloneSettleMs = 250;
 constexpr uint64_t kStallMs = 1000;
+constexpr uint64_t kHyprlandWaitMs = 10000;
+constexpr auto kHyprlandRetry = std::chrono::milliseconds(250);
 constexpr auto kCursorPoll = std::chrono::milliseconds(8);
 constexpr auto kWatchdogPoll = std::chrono::milliseconds(250);
 constexpr const char* kInputDir = "/dev/input";
@@ -96,17 +99,36 @@ bool queryCursor(const std::string& socket, int& x, int& y) {
   return hyprRequest(socket, "j/cursorpos", reply) && lnx::parseCursorPos(reply, x, y);
 }
 
-// Owns the Hyprland socket: fills in the positions of Decision's emits, in order, and polls the cursor while a
-// wheel is open. The event loop only queues work here, so a slow compositor never delays a forwarded event.
+// Started at login, the helper can come up before Hyprland answers on its socket: keep asking for a while.
+bool waitForHyprland(const std::string& socket) {
+  const uint64_t giveUp = nowMs() + kHyprlandWaitMs;
+  int x = 0;
+  int y = 0;
+  while (!queryCursor(socket, x, y)) {
+    if (nowMs() >= giveUp) return false;
+    std::this_thread::sleep_for(kHyprlandRetry);
+  }
+  return true;
+}
+
+// Owns the Hyprland socket: fills in the positions of Decision's emits, in order, polls the cursor while a press is
+// pending or a wheel is open, and wakes the event loop through `wakeFd` once a pending press has moved far enough.
+// The event loop only queues work here, so a slow compositor never delays a forwarded event.
 class CursorThread {
  public:
-  CursorThread(std::string socket, Output& out) : socket_(std::move(socket)), out_(out), thread_([this] { run(); }) {}
+  CursorThread(std::string socket, Output& out, int wakeFd)
+      : socket_(std::move(socket)), out_(out), wakeFd_(wakeFd), thread_([this] { run(); }) {}
   ~CursorThread() { stop(); }
   CursorThread(const CursorThread&) = delete;
   CursorThread& operator=(const CursorThread&) = delete;
 
-  void press() { push(Item{true, Emit{Emit::Kind::Cancel}}); }
-  void emit(const Emit& e) { push(Item{false, e}); }
+  void press(uint64_t seq, int thresholdPx) {
+    push(Item{Item::Kind::Press, Emit{Emit::Kind::Cancel}, seq, thresholdPx});
+  }
+  void pressEnded() { push(Item{Item::Kind::PressEnded, Emit{Emit::Kind::Cancel}, 0, 0}); }
+  void emit(const Emit& e) { push(Item{Item::Kind::Emit, e, 0, 0}); }
+  // The press that has moved past its threshold since the last call, 0 for none.
+  uint64_t takeDragged() { return dragged_.exchange(0); }
   // Sends what is queued, then joins.
   void stop() {
     {
@@ -119,8 +141,10 @@ class CursorThread {
 
  private:
   struct Item {
-    bool press;
+    enum class Kind { Press, PressEnded, Emit } kind;
     Emit emit;
+    uint64_t seq;
+    int thresholdPx;
   };
 
   void push(const Item& item) {
@@ -134,12 +158,13 @@ class CursorThread {
   void run() {
     using Clock = std::chrono::steady_clock;
     lnx::CursorEmits placer([this](int& x, int& y) { return queryCursor(socket_, x, y); });
+    uint64_t pressSeq = 0;
     auto nextPoll = Clock::now();
     std::unique_lock<std::mutex> lk(mu_);
     while (true) {
       const auto ready = [this] { return stopping_ || !q_.empty(); };
       if (q_.empty() && stopping_) return;
-      if (placer.open()) cv_.wait_until(lk, nextPoll, ready);
+      if (placer.polling()) cv_.wait_until(lk, nextPoll, ready);
       else cv_.wait(lk, ready);
       std::optional<Item> item;
       if (!q_.empty()) {
@@ -147,24 +172,39 @@ class CursorThread {
         q_.pop_front();
       }
       lk.unlock();
-      if (item && item->press) {
-        placer.onPress();
+      if (item && item->kind == Item::Kind::Press) {
+        placer.onPress(item->thresholdPx);
+        pressSeq = item->seq;
+        nextPoll = Clock::now() + kCursorPoll;
+      } else if (item && item->kind == Item::Kind::PressEnded) {
+        placer.onPressEnded();
       } else if (item) {
         if (const auto e = placer.onEmit(item->emit)) {
           out_.emit(*e);
           if (e->kind == Emit::Kind::WheelOpen) nextPoll = Clock::now();  // the first move right behind the open
         }
       }
-      if (placer.open() && Clock::now() >= nextPoll) {
-        if (const auto m = placer.onPoll()) out_.emit(*m);
+      if (placer.polling() && Clock::now() >= nextPoll) {
+        const lnx::CursorEmits::Poll p = placer.onPoll();
+        if (p.move) out_.emit(*p.move);
+        if (p.dragged) wake(pressSeq);
         nextPoll = Clock::now() + kCursorPoll;
       }
       lk.lock();
     }
   }
 
+  void wake(uint64_t seq) {
+    dragged_.store(seq);
+    const uint64_t one = 1;
+    // Fails only when the counter is full, and then a wake-up is already waiting.
+    [[maybe_unused]] const ssize_t n = ::write(wakeFd_, &one, sizeof(one));
+  }
+
   std::string socket_;
   Output& out_;
+  int wakeFd_;
+  std::atomic<uint64_t> dragged_{0};
   std::mutex mu_;
   std::condition_variable cv_;
   std::deque<Item> q_;
@@ -247,8 +287,7 @@ struct Device {
   bool grabbed = false;
   uint64_t grabAfterMs = 0;          // clone made, real mouse not grabbed yet
   std::vector<input_event> frame;    // passed events of the current frame, written at its SYN_REPORT
-  int dx = 0;                        // motion of this frame not yet fed to Decision
-  int dy = 0;
+  bool moved = false;                // the current frame has motion Decision hasn't seen
 };
 
 Decision* g_decision = nullptr;
@@ -261,10 +300,10 @@ int g_nextId = 1;
 bool g_grabbing = false;              // mice are cloned and grabbed while Decision is enabled
 int g_gestureMouse = 0;               // the mouse whose press Decision holds: replays go to its clone
 libevdev_uinput* g_maskKeyboard = nullptr;
-// Decision's coordinates: raw motion summed over every mouse. Only distances matter (the drag threshold); real
-// screen positions come from the cursor thread.
-int g_x = 0;
-int g_y = 0;
+// The gesture press Decision holds as pending, numbered so that a late "moved far enough" from the cursor thread
+// can't open the wheel of a later press.
+uint64_t g_pressSeq = 0;
+bool g_pressPending = false;
 
 bool isKeyDown(uint32_t vk) { return g_keys.isDown(vk); }
 
@@ -328,22 +367,23 @@ void release(Device& d) {
     d.clone = nullptr;
   }
   d.frame.clear();
-  d.dx = 0;
-  d.dy = 0;
+  d.moved = false;
 }
 
-bool anyKeyHeld(const Device& d) {
+// Every key and button the device holds, as libevdev last saw it.
+std::vector<uint16_t> heldKeys(const libevdev* dev) {
+  std::vector<uint16_t> held;
   for (unsigned code = 0; code <= KEY_MAX; ++code) {
-    if (libevdev_get_event_value(d.dev, EV_KEY, code) != 0) return true;
+    if (libevdev_get_event_value(dev, EV_KEY, code) != 0) held.push_back(static_cast<uint16_t>(code));
   }
-  return false;
+  return held;
 }
 
 // A mouse is grabbed only while none of its buttons is held: the compositor saw that press and must see its release.
 void grabSettled(uint64_t now) {
   for (auto& p : g_devices) {
     Device& d = *p;
-    if (d.dead || d.clone == nullptr || d.grabbed || now < d.grabAfterMs || anyKeyHeld(d)) continue;
+    if (d.dead || d.clone == nullptr || d.grabbed || now < d.grabAfterMs || !heldKeys(d.dev).empty()) continue;
     const int rc = libevdev_grab(d.dev, LIBEVDEV_GRAB);
     if (rc < 0) {  // another program holds it (EBUSY): leave it alone until lolPing is turned on again
       g_out->error("can't grab " + std::string(libevdev_get_name(d.dev)) + ": " + errnoText(-rc));
@@ -373,6 +413,11 @@ void apply(const Result& r) {
     if (i.kind == InjectKind::ButtonDown) replayButton(i.btn, true);
     if (i.kind == InjectKind::ButtonUp) replayButton(i.btn, false);
   }
+  // A press can stop pending without an emit (a replayed click): the cursor thread must stop watching it.
+  if (g_pressPending && g_decision->state() != Decision::State::Pending) {
+    g_pressPending = false;
+    g_cursor->pressEnded();
+  }
   updateGrabs();
 }
 
@@ -387,22 +432,23 @@ void feedKeys(const std::vector<lnx::KeyTransition>& keys) {
   }
 }
 
+// Decision's coordinates stay at (0, 0). Raw motion is in device counts, which depend on DPI and acceleration, so the
+// drag threshold is measured in screen pixels by the cursor thread instead; it asks for openWheel() once the pending
+// press has moved far enough. These moves still keep Decision's stale-gesture timer going.
 void feedMotion(Device& d) {
-  if (d.dx == 0 && d.dy == 0) return;
-  if (g_decision->state() == Decision::State::Idle) {  // no gesture to measure: restart the sum, it never overflows
-    g_x = 0;
-    g_y = 0;
-  }
-  g_x += d.dx;
-  g_y += d.dy;
-  d.dx = 0;
-  d.dy = 0;
+  if (!d.moved) return;
+  d.moved = false;
   InputEvent e;
   e.kind = EvKind::MouseMove;
-  e.x = g_x;
-  e.y = g_y;
   e.timeMs = nowMs();
   apply(g_decision->onEvent(e));  // moves always pass
+}
+
+// The cursor thread saw press `seq` move past the drag threshold on screen: a move just past Decision's own threshold
+// opens the wheel.
+void openWheel(uint64_t seq) {
+  if (seq == 0 || seq != g_pressSeq || g_decision->state() != Decision::State::Pending) return;
+  apply(g_decision->onEvent(lnx::pastThresholdMove(g_decision->config().dragThresholdPx, nowMs())));
 }
 
 void handleButton(Device& d, const input_event& ev, Btn btn) {
@@ -410,14 +456,13 @@ void handleButton(Device& d, const input_event& ev, Btn btn) {
   InputEvent e;
   e.kind = ev.value != 0 ? EvKind::MouseDown : EvKind::MouseUp;
   e.btn = btn;
-  e.x = g_x;
-  e.y = g_y;
   e.timeMs = nowMs();
   if (e.kind == EvKind::MouseDown) g_decision->syncKeyStates(isKeyDown);
   const Result r = g_decision->onEvent(e);
   if (e.kind == EvKind::MouseDown && r.swallow && g_decision->state() == Decision::State::Pending) {
     g_gestureMouse = d.id;
-    g_cursor->press();
+    g_pressPending = true;
+    g_cursor->press(++g_pressSeq, g_decision->config().dragThresholdPx);
   }
   if (!r.swallow) d.frame.push_back(ev);
   if (lnx::shouldTapMask(e, r.swallow, g_keys)) tapMask();
@@ -428,15 +473,18 @@ void handleEvent(Device& d, const input_event& ev) {
   const Btn btn = ev.type == EV_KEY ? lnx::buttonOf(ev.code) : Btn::None;
   // Keys count wherever they come from: some mice have a keyboard part on the same node.
   if (ev.type == EV_KEY && btn == Btn::None) feedKeys(g_keys.onKey(d.id, ev.code, ev.value));
-  if (!d.mouse || !d.grabbed) return;  // the compositor reads it directly
+  if (!d.mouse) return;
+  if (!d.grabbed) {  // the compositor reads it directly, but Decision still needs its releases
+    if (btn != Btn::None && ev.value == 0) apply(lnx::ungrabbedRelease(*g_decision, btn, nowMs()));
+    return;
+  }
   if (btn != Btn::None && (ev.value == 0 || ev.value == 1)) {
     handleButton(d, ev, btn);
   } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
     feedMotion(d);
     flushFrame(d);
   } else {
-    if (ev.type == EV_REL && ev.code == REL_X) d.dx += ev.value;
-    if (ev.type == EV_REL && ev.code == REL_Y) d.dy += ev.value;
+    if (ev.type == EV_REL && (ev.code == REL_X || ev.code == REL_Y)) d.moved = true;
     d.frame.push_back(ev);
   }
 }
@@ -494,14 +542,8 @@ void addDevice(const std::string& node, bool& denied) {
     ::close(fd);
     return;
   }
-  lnx::DeviceCaps caps;
-  caps.relX = libevdev_has_event_code(dev, EV_REL, REL_X) != 0;
-  caps.relY = libevdev_has_event_code(dev, EV_REL, REL_Y) != 0;
-  caps.btnLeft = libevdev_has_event_code(dev, EV_KEY, BTN_LEFT) != 0;
-  caps.abs = libevdev_has_event_type(dev, EV_ABS) != 0;
-  caps.keyA = libevdev_has_event_code(dev, EV_KEY, KEY_A) != 0;
-  caps.keyLeftAlt = libevdev_has_event_code(dev, EV_KEY, KEY_LEFTALT) != 0;
-  const lnx::DeviceKind kind = lnx::deviceKind(caps);
+  const lnx::DeviceKind kind = lnx::deviceKind(
+      lnx::readCaps([dev](uint16_t type, uint16_t code) { return libevdev_has_event_code(dev, type, code) != 0; }));
   if (kind == lnx::DeviceKind::Other) {
     libevdev_free(dev);
     ::close(fd);
@@ -515,11 +557,7 @@ void addDevice(const std::string& node, bool& denied) {
   d->mouse = kind == lnx::DeviceKind::Mouse;
   Device& added = *d;
   g_devices.push_back(std::move(d));
-  std::vector<uint16_t> held;  // a modifier may already be down
-  for (unsigned code = 0; code <= KEY_MAX; ++code) {
-    if (libevdev_get_event_value(dev, EV_KEY, code) != 0) held.push_back(static_cast<uint16_t>(code));
-  }
-  feedKeys(g_keys.setHeld(added.id, held));
+  feedKeys(g_keys.setHeld(added.id, heldKeys(dev)));  // a modifier may already be down
   if (added.mouse && g_grabbing) startClone(added);
 }
 
@@ -610,7 +648,7 @@ int pollTimeout(uint64_t now, uint64_t nextTick) {
 }
 
 // Returns the exit code: 0 once stdin closes or on shutdown.
-int runLoop(int inotifyFd) {
+int runLoop(int inotifyFd, int wakeFd) {
   std::string pending;
   std::vector<pollfd> fds;
   std::vector<Device*> owners;  // owners[i] reads fds[i + first]
@@ -619,6 +657,7 @@ int runLoop(int inotifyFd) {
     fds.clear();
     owners.clear();
     fds.push_back({STDIN_FILENO, POLLIN, 0});
+    fds.push_back({wakeFd, POLLIN, 0});
     if (inotifyFd >= 0) fds.push_back({inotifyFd, POLLIN, 0});
     const size_t first = fds.size();
     // Keyboards first: when a key and a click wait together, the key (Alt) almost always came first.
@@ -635,6 +674,12 @@ int runLoop(int inotifyFd) {
       g_out->error("poll failed: " + errnoText(errno));
       return kExitFailed;
     }
+    // Before the devices: the press moved past the threshold before whatever release may be waiting there.
+    if (fds[1].revents != 0) {
+      uint64_t count = 0;
+      [[maybe_unused]] const ssize_t r = ::read(wakeFd, &count, sizeof(count));
+      openWheel(g_cursor->takeDragged());
+    }
     for (size_t i = 0; n > 0 && i < owners.size(); ++i) {
       if (fds[first + i].revents != 0) readDevice(*owners[i]);
     }
@@ -647,7 +692,7 @@ int runLoop(int inotifyFd) {
       dropDevice(**it);
       it = g_devices.erase(it);
     }
-    if (inotifyFd >= 0 && fds[1].revents != 0) readHotplug(inotifyFd);
+    if (inotifyFd >= 0 && fds[2].revents != 0) readHotplug(inotifyFd);
     if (fds[0].revents != 0 && ((fds[0].revents & POLLNVAL) != 0 || !readStdin(pending))) return 0;
     const uint64_t now = nowMs();
     if (now >= nextTick) {
@@ -675,9 +720,7 @@ void closeAll(int inotifyFd) {
 
 int runHooks(Output& out) {
   const std::string socket = hyprSocketPath();
-  int x = 0;
-  int y = 0;
-  if (socket.empty() || !queryCursor(socket, x, y)) {
+  if (socket.empty() || !waitForHyprland(socket)) {
     out.error("noHyprland", "Can't reach Hyprland: lolPing on Linux needs a Hyprland session");
     return kExitNoAccess;
   }
@@ -690,7 +733,13 @@ int runHooks(Output& out) {
     out.error("noAccess", "Can't write /dev/uinput: lolPing needs a udev rule that gives access to it");
     return kExitNoAccess;
   }
-  CursorThread cursor(socket, out);
+  const int wakeFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (wakeFd < 0) {
+    out.error("can't create an eventfd: " + errnoText(errno));
+    libevdev_uinput_destroy(g_maskKeyboard);
+    return kExitFailed;
+  }
+  CursorThread cursor(socket, out, wakeFd);
   Watchdog watchdog;
   g_cursor = &cursor;
   g_watchdog = &watchdog;
@@ -701,15 +750,18 @@ int runHooks(Output& out) {
   bool denied = false;
   scanDevices(denied);
   const bool anyMouse = std::any_of(g_devices.begin(), g_devices.end(), [](const auto& d) { return d->mouse; });
+  int code = kExitNoAccess;
   if (!anyMouse && denied) {
-    closeAll(inotifyFd);
     out.error("noAccess", "Can't read the mouse: lolPing needs the input group");
-    return kExitNoAccess;
+  } else {
+    updateGrabs();
+    out.ready();
+    code = runLoop(inotifyFd, wakeFd);
   }
-  updateGrabs();
-  out.ready();
-  const int code = runLoop(inotifyFd);
   closeAll(inotifyFd);
+  cursor.stop();  // before the fd it writes to is closed
+  watchdog.stop();
+  ::close(wakeFd);
   return code;
 }
 

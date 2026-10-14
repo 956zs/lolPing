@@ -13,7 +13,9 @@
 // Pure logic for the Linux hook layer. No Linux headers, so it is unit-tested on every platform.
 namespace lp::lnx {
 
-// evdev key codes from linux/input-event-codes.h.
+// evdev event types and codes from linux/input-event-codes.h.
+constexpr uint16_t kEvKey = 0x01, kEvRel = 0x02, kEvAbs = 0x03;
+constexpr uint16_t kRelX = 0x00, kRelY = 0x01, kAbsX = 0x00, kAbsMtPositionX = 0x35;
 constexpr uint16_t kKeyA = 30, kKeyLeftAlt = 56, kKeyF24 = 194;
 constexpr uint16_t kBtnLeft = 0x110, kBtnRight = 0x111, kBtnMiddle = 0x112, kBtnSide = 0x113, kBtnExtra = 0x114;
 
@@ -29,19 +31,26 @@ struct DeviceCaps {
   bool relX = false;
   bool relY = false;
   bool btnLeft = false;
-  bool abs = false;  // any EV_ABS axis: touchpads, tablets, touchscreens and joysticks have one
+  // ABS_X or ABS_MT_POSITION_X: an absolute pointer (touchpad, tablet, touchscreen). Other axes, such as the
+  // ABS_MISC or ABS_VOLUME some gaming mice add to their pointer node, don't count.
+  bool absPointer = false;
   bool keyA = false;
   bool keyLeftAlt = false;
 };
 
+// Whether a device reports an event type and code, as libevdev_has_event_code answers it.
+using HasCode = std::function<bool(uint16_t type, uint16_t code)>;
+DeviceCaps readCaps(const HasCode& has);
+
 enum class DeviceKind { Other, Mouse, Keyboard };
 
-// Mouse: REL_X, REL_Y and BTN_LEFT without EV_ABS. Keyboard: letter or modifier keys. A node with both is a mouse,
-// so it gets grabbed; its keys still count as keyboard keys.
+// Mouse: REL_X, REL_Y and BTN_LEFT, and not an absolute pointer. Keyboard: letter or modifier keys. A node with both
+// is a mouse, so it gets grabbed; its keys still count as keyboard keys.
 DeviceKind deviceKind(const DeviceCaps& caps);
 
-// Whether an input device's sysfs node (the resolved /sys/class/input/eventN) is virtual: uinput devices such as
-// our own clones, ydotoold and Sunshine's passthrough, which reports a real bus type.
+// Whether an input device's sysfs node (the resolved /sys/class/input/eventN) is a uinput device: our own clones,
+// ydotoold, Sunshine's passthrough (which reports a real bus type). Those live under /sys/devices/virtual/input/.
+// Bluetooth LE devices come through uhid, elsewhere under /sys/devices/virtual/, and are real.
 bool isVirtualDevice(const std::string& sysfsPath);
 
 struct KeyTransition {
@@ -73,28 +82,52 @@ bool shouldTapMask(const InputEvent& e, bool swallowed, const KeyUnion& keys);
 // Parses Hyprland's reply to `j/cursorpos`, such as {"x": 4467, "y": 885} over several lines.
 bool parseCursorPos(const std::string& reply, int& x, int& y);
 
-// Gives Decision's emits their screen positions (docs/design-linux.md §2.5). Decision only sees motion summed from
-// evdev; the compositor knows where the cursor is. The cursor thread calls this in the order the event thread
-// queued presses and emits, and polls it every 8 ms while open().
+// Whether the cursor at (x, y) is more than `thresholdPx` screen pixels from the press at (fromX, fromY): the same
+// test Decision makes on Windows and macOS, where it gets screen coordinates.
+bool movedPastThreshold(int fromX, int fromY, int x, int y, int thresholdPx);
+
+// The move the event loop feeds Decision once the cursor thread reports that the pending press moved past the drag
+// threshold on screen. Every other mouse event reaches Decision at (0, 0), so raw motion never opens a wheel.
+InputEvent pastThresholdMove(int dragThresholdPx, uint64_t timeMs);
+
+// A button released on a mouse that isn't grabbed. The compositor already has the release, so nothing is swallowed
+// or replayed, but Decision sees it: a gesture cut short by a pause waits in SwallowUp for that release and would
+// block every other trigger button until it came.
+Result ungrabbedRelease(Decision& d, Btn btn, uint64_t timeMs);
+
+// Gives Decision's emits their screen positions and measures the drag threshold on screen (docs/design-linux.md
+// §2.5). evdev only reports relative motion, in device counts; the compositor knows where the cursor is. The cursor
+// thread calls this in the order the event thread queued presses and emits, and polls it every 8 ms while polling().
 class CursorEmits {
  public:
   using Query = std::function<bool(int& x, int& y)>;  // asks the compositor; false when it didn't answer
 
   explicit CursorEmits(Query query) : query_(std::move(query)) {}
 
-  // A press started a gesture: a wheel or a click it turns into is placed where it happened.
-  void onPress();
+  // A press Decision holds as pending: a wheel or a click it turns into is placed where it happened, and polls
+  // watch it until it has moved more than `thresholdPx`.
+  void onPress(int thresholdPx);
+  // The pending press ended without an emit that says so (a replayed click, or the trigger let go).
+  void onPressEnded();
   // One of Decision's emits with its position filled in, or nothing: Decision's own wheelMoves are dropped.
   std::optional<Emit> onEmit(const Emit& e);
-  // While a wheel is open: a wheelMove when the cursor moved since the last point sent.
-  std::optional<Emit> onPoll();
+
+  struct Poll {
+    std::optional<Emit> move;  // an open wheel's cursor moved: send this wheelMove
+    bool dragged = false;      // the pending press moved past its threshold: the event loop should open the wheel
+  };
+  Poll onPoll();
+  bool polling() const { return open_ || pending_; }
   bool open() const { return open_; }
 
  private:
-  void where(int& x, int& y);  // asks the compositor, or falls back to its last answer
+  bool where(int& x, int& y);  // asks the compositor, or falls back to its last answer (false)
 
   Query query_;
   bool open_ = false;
+  bool pending_ = false;
+  bool pressKnown_ = false;  // the compositor answered at the press; if not, the first poll that gets an answer sets it
+  int thresholdPx_ = 0;
   WheelKind wheel_ = WheelKind::Ping;
   int pressX_ = 0, pressY_ = 0;
   int sentX_ = 0, sentY_ = 0;    // the last point sent while open
