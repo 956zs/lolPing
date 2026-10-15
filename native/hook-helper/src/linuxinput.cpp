@@ -1,7 +1,9 @@
 #include "linuxinput.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <utility>
 
 #include "json.h"
 
@@ -197,58 +199,160 @@ Result ungrabbedRelease(Decision& d, Btn btn, uint64_t timeMs) {
   return r;
 }
 
-bool CursorEmits::where(int& x, int& y) {
-  int qx = 0;
-  int qy = 0;
-  const bool answered = query_ && query_(qx, qy);
-  if (answered) {
-    knownX_ = qx;
-    knownY_ = qy;
-  }
-  x = knownX_;
-  y = knownY_;
-  return answered;
+void CursorTracker::setScreens(std::vector<ScreenRect> screens) {
+  screens_ = std::move(screens);
+  if (locked_) clamp();
 }
 
-void CursorEmits::rawPoint(int& x, int& y) const {
-  x = pressX_ + static_cast<int>(std::lround(static_cast<double>(rawX_) * kPxPerCount));
-  y = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_) * kPxPerCount));
+void CursorTracker::setSensitivity(double pxPerCount) { sensitivity_ = pxPerCount; }
+
+void CursorTracker::onMotion(int dx, int dy) {
+  rawX_ += dx;
+  rawY_ += dy;
 }
 
-bool CursorEmits::rawPastThreshold() const {
-  int x = 0;
-  int y = 0;
-  rawPoint(x, y);
-  return movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_);
-}
-
-bool CursorEmits::atPress(int x, int y) const { return pressKnown_ && x == pressX_ && y == pressY_; }
-
-void CursorEmits::gestureEnded() {
-  pending_ = false;
-  open_ = false;
-  locked_ = false;
-}
-
-void CursorEmits::onPress(int thresholdPx) {
-  pressKnown_ = where(pressX_, pressY_);
-  thresholdPx_ = thresholdPx;
-  pending_ = true;
-  locked_ = false;
-  stillPolls_ = 0;
-  returnPolls_ = 0;
-  movedSincePoll_ = false;
+void CursorTracker::takeRaw(long& dx, long& dy) {
+  dx = rawX_;
+  dy = rawY_;
   rawX_ = 0;
   rawY_ = 0;
 }
 
-void CursorEmits::onPressEnded() { gestureEnded(); }
+// Keeps the locked window's cursor on a screen, as the window itself does: the nearest point of the screen it is
+// on or closest to. Without screens there is nothing to keep it on.
+void CursorTracker::clamp() {
+  if (screens_.empty()) return;
+  double bestX = vx_;
+  double bestY = vy_;
+  double bestDist = -1;
+  for (const auto& s : screens_) {
+    const double cx = std::min(std::max(vx_, static_cast<double>(s.x)), static_cast<double>(s.x + s.width - 1));
+    const double cy = std::min(std::max(vy_, static_cast<double>(s.y)), static_cast<double>(s.y + s.height - 1));
+    const double dist = std::hypot(cx - vx_, cy - vy_);
+    if (bestDist < 0 || dist < bestDist) {
+      bestDist = dist;
+      bestX = cx;
+      bestY = cy;
+    }
+  }
+  vx_ = bestX;
+  vy_ = bestY;
+}
+
+void CursorTracker::onAnswer(int x, int y) {
+  long dx = 0;
+  long dy = 0;
+  takeRaw(dx, dy);
+  const bool moved = dx != 0 || dy != 0;
+  if (!known_) {
+    known_ = true;
+    lastX_ = x;
+    lastY_ = y;
+    return;
+  }
+  if (!locked_) {
+    if (x != lastX_ || y != lastY_) {  // the cursor follows the mouse
+      lastX_ = x;
+      lastY_ = y;
+      stillPolls_ = 0;
+      stillRawX_ = 0;
+      stillRawY_ = 0;
+    } else if (moved) {  // the mouse moved, the cursor didn't: locked, once that holds for a few polls
+      stillRawX_ += dx;
+      stillRawY_ += dy;
+      if (++stillPolls_ >= kStillPolls) {
+        locked_ = true;
+        lockX_ = x;
+        lockY_ = y;
+        awayPolls_ = 0;
+        // The window took the cursor's position at the lock and has moved its own by the raw motion since.
+        vx_ = x + static_cast<double>(stillRawX_) * sensitivity_;
+        vy_ = y + static_cast<double>(stillRawY_) * sensitivity_;
+        clamp();
+      }
+    }
+    return;
+  }
+  vx_ += static_cast<double>(dx) * sensitivity_;
+  vy_ += static_cast<double>(dy) * sensitivity_;
+  clamp();
+  if (x == lockX_ && y == lockY_) {
+    awayPolls_ = 0;
+    return;
+  }
+  // Away from the lock point: caught mid-warp once, unlocked (or warped elsewhere) when it stays away.
+  if (++awayPolls_ >= kAwayPolls) {
+    locked_ = false;
+    lastX_ = x;
+    lastY_ = y;
+    stillPolls_ = 0;
+    stillRawX_ = 0;
+    stillRawY_ = 0;
+  }
+}
+
+void CursorTracker::onNoAnswer() {
+  long dx = 0;
+  long dy = 0;
+  takeRaw(dx, dy);
+  if (!locked_) return;
+  vx_ += static_cast<double>(dx) * sensitivity_;
+  vy_ += static_cast<double>(dy) * sensitivity_;
+  clamp();
+}
+
+void CursorTracker::resync(int x, int y) {
+  if (!locked_) return;
+  vx_ = x;
+  vy_ = y;
+  clamp();
+}
+
+bool CursorTracker::position(int& x, int& y) const {
+  if (!known_) return false;
+  if (locked_) {
+    x = static_cast<int>(std::lround(vx_));
+    y = static_cast<int>(std::lround(vy_));
+  } else {
+    x = lastX_;
+    y = lastY_;
+  }
+  return true;
+}
+
+void CursorEmits::setConfig(const Config& c) {
+  tracker_.setScreens(c.screens);
+  tracker_.setSensitivity(c.lockedSensitivity);
+}
+
+bool CursorEmits::sample() {
+  int x = 0;
+  int y = 0;
+  const bool answered = query_ && query_(x, y);
+  if (answered) tracker_.onAnswer(x, y);
+  else tracker_.onNoAnswer();
+  return answered;
+}
+
+void CursorEmits::onPress(int thresholdPx) {
+  // Without an answer the press is placed at the last known position, but measured from the first answer: the
+  // last one may be old.
+  pressKnown_ = sample();
+  where(pressX_, pressY_);
+  thresholdPx_ = thresholdPx;
+  pending_ = true;
+  rawX_ = 0;
+  rawY_ = 0;
+}
+
+void CursorEmits::onPressEnded() { pending_ = false; }
 
 void CursorEmits::onMotion(int dx, int dy) {
-  if (!polling()) return;
-  rawX_ += dx;
-  rawY_ += dy;
-  movedSincePoll_ = movedSincePoll_ || dx != 0 || dy != 0;
+  tracker_.onMotion(dx, dy);
+  if (polling()) {
+    rawX_ += dx;
+    rawY_ += dy;
+  }
 }
 
 std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
@@ -264,21 +368,30 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
       sentY_ = pressY_;
       return out;
     case Emit::Kind::Click:
+      pending_ = false;
       out.x = pressX_;
       out.y = pressY_;
-      gestureEnded();
       return out;
     case Emit::Kind::WheelMove:
       return std::nullopt;  // the poll sends real positions instead
-    case Emit::Kind::WheelRelease:
-      // A cursor back exactly on the press after a drag past the threshold is a locked pointer the polls hadn't
-      // caught yet: the raw motion says where the mouse went.
-      if (!locked_) where(out.x, out.y);
-      if (locked_ || (atPress(out.x, out.y) && rawPastThreshold())) rawPoint(out.x, out.y);
-      gestureEnded();
+    case Emit::Kind::WheelRelease: {
+      open_ = false;
+      sample();
+      where(out.x, out.y);
+      // The pointer got locked during this gesture and the tracker hasn't caught on yet: the compositor answers
+      // the press however far the mouse went. The raw motion says where.
+      const int rx = pressX_ + static_cast<int>(std::lround(static_cast<double>(rawX_)));
+      const int ry = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_)));
+      if (pressKnown_ && !tracker_.locked() && out.x == pressX_ && out.y == pressY_ &&
+          movedPastThreshold(pressX_, pressY_, rx, ry, thresholdPx_)) {
+        out.x = rx;
+        out.y = ry;
+      }
       return out;
+    }
     case Emit::Kind::Cancel:
-      gestureEnded();
+      pending_ = false;
+      open_ = false;
       return out;
     case Emit::Kind::Toggled:
       return out;
@@ -288,18 +401,17 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
 
 CursorEmits::Poll CursorEmits::onPoll() {
   Poll p;
+  const bool wasLocked = tracker_.locked();
+  sample();
   int x = 0;
   int y = 0;
-  if (!polling()) return p;
-  if (locked_) {  // the compositor's cursor stays put: the raw motion is the only position there is
-    rawPoint(x, y);
-  } else {
-    if (!query_ || !query_(x, y)) return p;
-    knownX_ = x;
-    knownY_ = y;
+  if (!polling() || !where(x, y)) return p;
+  // The lock was noticed during this gesture: the wheel sits on the lock point, and the raw motion since the press
+  // says where the window's cursor went from there, including what the first polls took for a drag.
+  if (!wasLocked && tracker_.locked() && pressKnown_) {
+    tracker_.resync(pressX_ + static_cast<int>(rawX_), pressY_ + static_cast<int>(rawY_));
+    where(x, y);
   }
-  const bool moved = movedSincePoll_;
-  movedSincePoll_ = false;
   if (pending_) {
     if (!pressKnown_) {  // no answer at the press: measure from the first one
       pressX_ = x;
@@ -308,23 +420,8 @@ CursorEmits::Poll CursorEmits::onPoll() {
     } else if (movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_)) {
       pending_ = false;  // once: the wheel's open emit or the press's end comes next
       p.dragged = true;
-    } else if (atPress(x, y) && rawPastThreshold()) {
-      // The mouse has moved far enough but the cursor is still on the press: a locked pointer, once it has stayed
-      // that way longer than a compositor that is merely behind. An answer a few pixels away in between doesn't
-      // count against it: Hyprland moves a locked cursor and warps it back, and a poll can land in between.
-      if (++stillPolls_ > kLockConfirmPolls) {
-        locked_ = true;
-        pending_ = false;
-        p.dragged = true;
-      }
     }
     return p;
-  }
-  // The wheel opened on an answer caught between a locked cursor's move and its warp back: the cursor keeps coming
-  // back exactly to the press while the mouse moves on. A drag the compositor follows never does that twice.
-  if (!locked_ && moved && atPress(x, y) && ++returnPolls_ >= kReturnPolls) {
-    locked_ = true;
-    rawPoint(x, y);
   }
   if (x == sentX_ && y == sentY_) return p;
   sentX_ = x;

@@ -46,6 +46,8 @@ constexpr uint64_t kStallMs = 1000;
 constexpr uint64_t kHyprlandWaitMs = 10000;
 constexpr auto kHyprlandRetry = std::chrono::milliseconds(250);
 constexpr auto kCursorPoll = std::chrono::milliseconds(8);
+// Outside a gesture the cursor is sampled while the mouse moves, so a pointer lock is known before the press.
+constexpr auto kTrackPoll = std::chrono::milliseconds(32);
 constexpr auto kWatchdogPoll = std::chrono::milliseconds(250);
 constexpr const char* kInputDir = "/dev/input";
 
@@ -112,8 +114,9 @@ bool waitForHyprland(const std::string& socket) {
 }
 
 // Owns the Hyprland socket: fills in the positions of Decision's emits, in order, polls the cursor while a press is
-// pending or a wheel is open, and wakes the event loop through `wakeFd` once a pending press has moved far enough.
-// The event loop only queues work here, so a slow compositor never delays a forwarded event.
+// pending or a wheel is open, samples it while the mouse moves otherwise, and wakes the event loop through `wakeFd`
+// once a pending press has moved far enough. The event loop only queues work here, so a slow compositor never
+// delays a forwarded event.
 class CursorThread {
  public:
   CursorThread(std::string socket, Output& out, int wakeFd)
@@ -122,19 +125,22 @@ class CursorThread {
   CursorThread(const CursorThread&) = delete;
   CursorThread& operator=(const CursorThread&) = delete;
 
-  void press(uint64_t seq, int thresholdPx) {
-    // Same thread as motion(): nothing from before the press is counted against it.
-    dx_.store(0, std::memory_order_relaxed);
-    dy_.store(0, std::memory_order_relaxed);
-    push(Item{Item::Kind::Press, Emit{Emit::Kind::Cancel}, seq, thresholdPx});
+  void press(uint64_t seq, int thresholdPx) { push(Item{Item::Kind::Press, Emit{Emit::Kind::Cancel}, seq, thresholdPx, Config{}}); }
+  void pressEnded() { push(Item{Item::Kind::PressEnded, Emit{Emit::Kind::Cancel}, 0, 0, Config{}}); }
+  void emit(const Emit& e) { push(Item{Item::Kind::Emit, e, 0, 0, Config{}}); }
+  void config(const Config& c) {
+    Item item{Item::Kind::Config, Emit{Emit::Kind::Cancel}, 0, 0, c};
+    push(item);
   }
-  void pressEnded() { push(Item{Item::Kind::PressEnded, Emit{Emit::Kind::Cancel}, 0, 0}); }
-  void emit(const Emit& e) { push(Item{Item::Kind::Emit, e, 0, 0}); }
-  // Raw motion of the gesture's mice, in counts. Added up here and read at the next poll: a wake-up per mouse frame
-  // would cost more than the 8 ms poll it would save.
+  // Raw motion of the mice, in counts. Added up here and read at the next poll: a wake-up per mouse frame would cost
+  // more than the poll it would save. Only the first motion after an idle spell wakes the thread.
   void motion(int dx, int dy) {
     dx_.fetch_add(dx, std::memory_order_relaxed);
     dy_.fetch_add(dy, std::memory_order_relaxed);
+    if (idle_.exchange(false, std::memory_order_acq_rel)) {
+      std::lock_guard<std::mutex> lk(mu_);  // so the wake-up can't slip in between the thread's check and its wait
+      cv_.notify_one();
+    }
   }
   // The press that has moved past its threshold since the last call, 0 for none.
   uint64_t takeDragged() { return dragged_.exchange(0); }
@@ -150,10 +156,11 @@ class CursorThread {
 
  private:
   struct Item {
-    enum class Kind { Press, PressEnded, Emit } kind;
+    enum class Kind { Press, PressEnded, Emit, Config } kind;
     Emit emit;
     uint64_t seq;
     int thresholdPx;
+    Config config;
   };
 
   void push(const Item& item) {
@@ -169,12 +176,19 @@ class CursorThread {
     lnx::CursorEmits placer([this](int& x, int& y) { return queryCursor(socket_, x, y); });
     uint64_t pressSeq = 0;
     auto nextPoll = Clock::now();
+    bool tracking = false;  // the mouse moved since the last sample: keep sampling
     std::unique_lock<std::mutex> lk(mu_);
     while (true) {
-      const auto ready = [this] { return stopping_ || !q_.empty(); };
+      const auto ready = [this] { return stopping_ || !q_.empty() || !idle_.load(std::memory_order_acquire); };
       if (q_.empty() && stopping_) return;
-      if (placer.polling()) cv_.wait_until(lk, nextPoll, ready);
-      else cv_.wait(lk, ready);
+      if (placer.polling()) {
+        cv_.wait_until(lk, nextPoll, ready);
+      } else if (tracking) {
+        cv_.wait_until(lk, nextPoll, ready);
+      } else {
+        idle_.store(true, std::memory_order_release);
+        cv_.wait(lk, ready);
+      }
       std::optional<Item> item;
       if (!q_.empty()) {
         item = q_.front();
@@ -190,6 +204,8 @@ class CursorThread {
       } else if (item && item->kind == Item::Kind::PressEnded) {
         drainMotion(placer);
         placer.onPressEnded();
+      } else if (item && item->kind == Item::Kind::Config) {
+        placer.setConfig(item->config);
       } else if (item) {
         drainMotion(placer);
         if (const auto e = placer.onEmit(item->emit)) {
@@ -197,21 +213,32 @@ class CursorThread {
           if (e->kind == Emit::Kind::WheelOpen) nextPoll = Clock::now();  // the first move right behind the open
         }
       }
-      if (placer.polling() && Clock::now() >= nextPoll) {
-        drainMotion(placer);
-        const lnx::CursorEmits::Poll p = placer.onPoll();
-        if (p.move) out_.emit(*p.move);
-        if (p.dragged) wake(pressSeq);
-        nextPoll = Clock::now() + kCursorPoll;
+      if (placer.polling()) {
+        if (Clock::now() >= nextPoll) {
+          drainMotion(placer);
+          const lnx::CursorEmits::Poll p = placer.onPoll();
+          if (p.move) out_.emit(*p.move);
+          if (p.dragged) wake(pressSeq);
+          nextPoll = Clock::now() + kCursorPoll;
+        }
+        tracking = true;  // the first sample after the gesture tells whether the mouse is still moving
+      } else if (!tracking || Clock::now() >= nextPoll) {
+        // Woken by motion, or a tracking sample is due: sample while the mouse keeps moving.
+        tracking = drainMotion(placer);
+        if (tracking) placer.onPoll();
+        nextPoll = Clock::now() + kTrackPoll;
       }
       lk.lock();
     }
   }
 
-  void drainMotion(lnx::CursorEmits& placer) {
+  // Hands the raw motion since the last call to the placer. False when there was none.
+  bool drainMotion(lnx::CursorEmits& placer) {
     const int dx = dx_.exchange(0, std::memory_order_relaxed);
     const int dy = dy_.exchange(0, std::memory_order_relaxed);
-    if (dx != 0 || dy != 0) placer.onMotion(dx, dy);
+    if (dx == 0 && dy == 0) return false;
+    placer.onMotion(dx, dy);
+    return true;
   }
 
   void wake(uint64_t seq) {
@@ -226,6 +253,7 @@ class CursorThread {
   int wakeFd_;
   std::atomic<uint64_t> dragged_{0};
   std::atomic<int> dx_{0}, dy_{0};
+  std::atomic<bool> idle_{false};  // waiting for motion: the next motion() must wake the thread
   std::mutex mu_;
   std::condition_variable cv_;
   std::deque<Item> q_;
@@ -463,7 +491,7 @@ void feedKeys(const std::vector<lnx::KeyTransition>& keys) {
 void feedMotion(Device& d) {
   if (!d.moved) return;
   d.moved = false;
-  if (g_pressPending || g_decision->state() == Decision::State::Wheel) g_cursor->motion(d.dx, d.dy);
+  g_cursor->motion(d.dx, d.dy);
   d.dx = 0;
   d.dy = 0;
   InputEvent e;
@@ -644,7 +672,10 @@ libevdev_uinput* createMaskKeyboard() {
 bool handleCommand(const std::string& text) {
   const Command c = parseCommand(text, g_decision->config());
   switch (c.kind) {
-    case Command::Kind::Config: apply(g_decision->setConfig(c.config)); break;
+    case Command::Kind::Config:
+      apply(g_decision->setConfig(c.config));
+      g_cursor->config(c.config);
+      break;
     case Command::Kind::SetEnabled: apply(g_decision->setEnabled(c.flag)); break;
     case Command::Kind::Suspend: apply(g_decision->setSuspended(c.flag)); break;  // grabs stay: Decision passes all
     case Command::Kind::Shutdown: return false;

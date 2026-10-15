@@ -30,6 +30,13 @@ constexpr uint32_t ModAlt = 2;
 constexpr uint32_t ModShift = 4;
 constexpr uint32_t ModWin = 8;
 
+struct ScreenRect {
+  int x = 0;
+  int y = 0;
+  int width = 0;
+  int height = 0;
+};
+
 struct Config {
   Trigger trigger = Trigger::Alt;  // the ping wheel's
   uint32_t triggerVk = 0;          // only for Trigger::CustomVk
@@ -44,6 +51,10 @@ struct Config {
   uint32_t toggleMods = ModCtrl | ModAlt;
   uint32_t toggleVk = 0x50;  // 'P'
   bool enabled = true;
+  // Linux: the screens, in the compositor's layout pixels, and how far a window that locks the pointer moves its
+  // own cursor per raw count (its mouse sensitivity). See docs/design-linux.md §2.5.
+  std::vector<ScreenRect> screens;
+  double lockedSensitivity = 1.0;
 };
 
 struct Emit {

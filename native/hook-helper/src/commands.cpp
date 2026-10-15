@@ -1,6 +1,8 @@
 #include "commands.h"
 
+#include <algorithm>
 #include <map>
+#include <vector>
 
 #include "json.h"
 
@@ -31,6 +33,50 @@ long long getInt(const Fields& m, const char* k, long long def) {
   } catch (...) {
     return def;
   }
+}
+
+// A number as JSON writes it, whole or with a fraction. def when the field is missing or malformed.
+double getNum(const Fields& m, const char* k, double def) {
+  const auto it = m.find(k);
+  if (it == m.end()) return def;
+  try {
+    size_t used = 0;
+    const double v = std::stod(it->second, &used);
+    return used == it->second.size() ? v : def;
+  } catch (...) {
+    return def;
+  }
+}
+
+// "x,y,width,height;x,y,width,height": the screens, flat because the parser has no nesting. Malformed: none.
+std::vector<ScreenRect> parseScreens(const std::string& s) {
+  std::vector<ScreenRect> out;
+  size_t pos = 0;
+  while (pos <= s.size()) {
+    const size_t end = std::min(s.find(';', pos), s.size());
+    const std::string item = s.substr(pos, end - pos);
+    pos = end + 1;
+    if (item.empty()) continue;
+    ScreenRect r;
+    int* fields[] = {&r.x, &r.y, &r.width, &r.height};
+    size_t at = 0;
+    bool ok = true;
+    for (int* f : fields) {
+      const size_t comma = std::min(item.find(',', at), item.size());
+      try {
+        size_t used = 0;
+        const std::string part = item.substr(at, comma - at);
+        *f = std::stoi(part, &used);
+        ok = ok && !part.empty() && used == part.size();
+      } catch (...) {
+        ok = false;
+      }
+      at = comma + 1;
+    }
+    if (!ok || at <= item.size() || r.width <= 0 || r.height <= 0) return {};
+    out.push_back(r);
+  }
+  return out;
 }
 
 bool parseTrigger(const std::string& s, Trigger& t) {
@@ -83,6 +129,9 @@ Command parseCommand(const std::string& line, const Config& current) {
     cfg.toggleMods = static_cast<uint32_t>(getInt(m, "toggleMods", cfg.toggleMods));
     cfg.toggleVk = static_cast<uint32_t>(getInt(m, "toggleVk", cfg.toggleVk));
     cfg.enabled = getBool(m, "enabled", cfg.enabled);
+    if (m.count("screens") != 0) cfg.screens = parseScreens(m["screens"]);
+    const double sens = getNum(m, "lockedSensitivity", cfg.lockedSensitivity);
+    if (sens >= 0.05 && sens <= 20.0) cfg.lockedSensitivity = sens;
     c.kind = Command::Kind::Config;
     c.config = cfg;
   } else if (type == "setEnabled") {

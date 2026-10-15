@@ -1258,7 +1258,7 @@ static void test_linux_pending_press_reports_a_drag_once() {
   FakeCursor c;
   c.answers = {{100, 100}, {104, 104}, {109, 100}, {200, 200}};
   lnx::CursorEmits p(c.query());
-  CHECK(!p.polling() && !p.onPoll().dragged && c.queries == 0);  // nothing to watch: no queries
+  CHECK(!p.polling());
   p.onPress(8);  // at (100, 100)
   CHECK(p.polling() && !p.open());
   lnx::CursorEmits::Poll poll = p.onPoll();
@@ -1266,12 +1266,11 @@ static void test_linux_pending_press_reports_a_drag_once() {
   poll = p.onPoll();
   CHECK(poll.dragged && !poll.move);  // 9 px
   CHECK(!p.polling());                // once: the wheel's open or the press's end comes next
-  const int before = c.queries;
-  CHECK(!p.onPoll().dragged && c.queries == before);
+  CHECK(!p.onPoll().dragged);         // a sample between: the cursor is at (200, 200) now
   // Decision's open emit arrives: placed at the press, not where the drag was noticed.
   const auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
   CHECK(e && e->x == 100 && e->y == 100 && p.open() && p.polling());
-  poll = p.onPoll();
+  poll = p.onPoll();  // no answer: the last position is still (200, 200)
   CHECK(!poll.dragged && poll.move && poll.move->x == 200 && poll.move->y == 200);
 }
 
@@ -1283,15 +1282,12 @@ static void test_linux_pending_press_stops_with_click_end_or_cancel() {
   CHECK(!p.onPoll().dragged);
   p.onPressEnded();  // a replayed click: Decision went idle without an emit
   CHECK(!p.polling());
-  int before = c.queries;
-  CHECK(!p.onPoll().dragged && c.queries == before);
   p.onPress(8);  // at (20, 20)
   const auto e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
   CHECK(e && e->x == 20 && e->y == 20 && !p.polling());
   p.onPress(8);  // at (30, 30)
   p.onEmit(Emit{Emit::Kind::Cancel});
-  before = c.queries;
-  CHECK(!p.polling() && !p.onPoll().dragged && c.queries == before);
+  CHECK(!p.polling() && !p.onPoll().dragged);
 }
 
 static void test_linux_pending_press_measures_from_the_first_answer() {
@@ -1372,7 +1368,7 @@ static void test_linux_cursor_emits_place_a_wheel_gesture() {
   FakeCursor c;
   c.answers = {{500, 300}, {510, 300}, {510, 300}, {520, 305}, {530, 310}};
   lnx::CursorEmits p(c.query());
-  CHECK(!p.open() && !p.onPoll().move && c.queries == 0);  // no polling while nothing is pending or open
+  CHECK(!p.open());
   p.onPress(8);  // the swallowed press, at (500, 300) on screen
   auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 7, 8));  // Decision's own coordinates mean nothing here
   CHECK(e && e->kind == Emit::Kind::WheelOpen && e->x == 500 && e->y == 300 && p.open());
@@ -1384,8 +1380,7 @@ static void test_linux_cursor_emits_place_a_wheel_gesture() {
   CHECK(m && m->x == 520 && m->y == 305);
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 40, 9));  // asks again at the release
   CHECK(e && e->kind == Emit::Kind::WheelRelease && e->x == 530 && e->y == 310 && !p.open() && !p.polling());
-  const int before = c.queries;
-  CHECK(!p.onPoll().move && c.queries == before);
+  CHECK(!p.onPoll().move);  // a sample outside a gesture sends nothing
 }
 
 static void test_linux_cursor_emits_click_cancel_and_toggle() {
@@ -1429,109 +1424,172 @@ static void test_linux_cursor_emits_survive_a_silent_compositor() {
   CHECK(!none.onPoll().move);
 }
 
-static void test_linux_locked_pointer_measures_the_gesture_in_raw_motion() {
-  // osu!lazer locks the pointer: the compositor answers the press position however far the mouse moves.
+namespace {
+bool at(const lnx::CursorTracker& t, int x, int y) {
+  int px = 0;
+  int py = 0;
+  return t.position(px, py) && px == x && py == y;
+}
+}  // namespace
+
+static void test_linux_tracker_follows_the_compositor_until_the_pointer_is_locked() {
+  lnx::CursorTracker t;
+  int x = 0;
+  int y = 0;
+  CHECK(!t.position(x, y));  // nothing known yet
+  t.onMotion(50, 50);
+  t.onAnswer(100, 100);
+  CHECK(at(t, 100, 100) && !t.locked());
+  t.onMotion(10, 0);
+  t.onAnswer(112, 100);  // the cursor follows (with acceleration): the answer is the position
+  CHECK(at(t, 112, 100) && !t.locked());
+  // Now a window locks the pointer: the mouse moves, the answer doesn't.
+  t.onMotion(20, 5);
+  t.onAnswer(112, 100);
+  CHECK(at(t, 112, 100) && !t.locked());  // once could be a slow compositor
+  t.onMotion(20, 5);
+  t.onAnswer(112, 100);
+  CHECK(t.locked() && at(t, 152, 110));  // twice: locked, and the window's cursor has the raw motion since
+  t.onMotion(-100, 0);
+  t.onAnswer(112, 100);
+  CHECK(at(t, 52, 110));
+  t.onMotion(0, -10);
+  t.onNoAnswer();  // a poll the compositor missed still moves the cursor
+  CHECK(at(t, 52, 100));
+  // The mouse rests: still polls with no motion mean nothing, locked or not.
+  t.onAnswer(112, 100);
+  CHECK(t.locked() && at(t, 52, 100));
+}
+
+static void test_linux_tracker_ignores_a_cursor_caught_mid_warp_but_follows_an_unlock() {
+  lnx::CursorTracker t;
+  t.onAnswer(300, 300);
+  for (int i = 0; i < lnx::CursorTracker::kStillPolls; ++i) {
+    t.onMotion(10, 0);
+    t.onAnswer(300, 300);
+  }
+  CHECK(t.locked() && at(t, 320, 300));
+  t.onMotion(10, 0);
+  t.onAnswer(340, 290);  // Hyprland moved the cursor and hadn't warped it back yet
+  CHECK(t.locked() && at(t, 330, 300));
+  t.onMotion(10, 0);
+  t.onAnswer(300, 300);  // back on the lock point: that was a glimpse
+  CHECK(t.locked() && at(t, 340, 300));
+  // The window lets go (or warped the cursor elsewhere): the answers stay off the lock point.
+  t.onMotion(5, 0);
+  t.onAnswer(600, 400);
+  CHECK(t.locked());
+  t.onMotion(5, 0);
+  t.onAnswer(605, 400);
+  CHECK(!t.locked() && at(t, 605, 400));
+  // A still spell without motion doesn't lock: the cursor is where the mouse left it.
+  t.onAnswer(605, 400);
+  t.onAnswer(605, 400);
+  CHECK(!t.locked());
+  // Warped to a new lock point and locked there: the position starts from that point.
+  t.onMotion(10, 0);
+  t.onAnswer(605, 400);
+  t.onMotion(10, 0);
+  t.onAnswer(605, 400);
+  CHECK(t.locked() && at(t, 625, 400));
+}
+
+static void test_linux_tracker_keeps_a_locked_cursor_on_a_screen_at_the_window_sensitivity() {
+  lnx::CursorTracker t;
+  t.setScreens({{0, 0, 1920, 1080}, {1920, 0, 1920, 1200}});
+  t.setSensitivity(0.5);
+  t.onAnswer(1900, 500);
+  t.onMotion(20, 0);
+  t.onAnswer(1900, 500);
+  t.onMotion(20, 0);
+  t.onAnswer(1900, 500);
+  CHECK(t.locked() && at(t, 1920, 500));  // 40 counts at 0.5: 20 px, onto the second screen
+  t.onMotion(0, 2000);
+  t.onAnswer(1900, 500);
+  CHECK(at(t, 1920, 1199));  // the second screen's bottom edge, 1200 tall
+  t.onMotion(-200, 0);
+  t.onAnswer(1900, 500);
+  CHECK(at(t, 1920, 1199));  // the second screen's corner is nearer than the first screen's edge
+  t.onMotion(-300, 0);
+  t.onAnswer(1900, 500);
+  CHECK(at(t, 1770, 1079));  // 150 px on: the first screen's bottom edge is nearer now
+  t.onMotion(-10000, -10000);
+  t.onAnswer(1900, 500);
+  CHECK(at(t, 0, 0));
+  t.onMotion(10, 10);
+  t.onAnswer(1900, 500);
+  CHECK(at(t, 5, 5));  // the window clamped its own cursor too, so the next motion starts from the corner
+  lnx::CursorTracker free;  // no screens known: nothing to keep the cursor on
+  free.onAnswer(0, 0);
+  free.onMotion(-10, 0);
+  free.onAnswer(0, 0);
+  free.onMotion(-10, 0);
+  free.onAnswer(0, 0);
+  CHECK(free.locked() && at(free, -20, 0));
+}
+
+static void test_linux_locked_pointer_gesture_follows_the_windows_own_cursor() {
+  // osu!lazer locks the pointer: the compositor answers the lock point however far the mouse moves. The tracker
+  // knew before the press, so the wheel opens where the window's own cursor is and follows the raw motion.
   FakeCursor c;
   c.stuck = {{400, 300}};
   lnx::CursorEmits p(c.query());
+  p.onPoll();  // the first sample only learns the position
+  for (int i = 0; i < lnx::CursorTracker::kStillPolls; ++i) {
+    p.onMotion(50, 0);
+    p.onPoll();  // tracking samples while the mouse moves
+  }
+  CHECK(p.locked() && !p.polling());
   p.onPress(8);
   p.onMotion(5, 0);
-  CHECK(!p.onPoll().dragged && !p.locked());  // 5 counts: not a drag in any unit
-  p.onMotion(5, 0);                           // 10 counts, 10 px at the default scale
-  for (int i = 0; i < lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged && !p.locked());
-  CHECK(p.onPoll().dragged && p.locked() && !p.polling());  // the cursor never moved: locked
+  CHECK(!p.onPoll().dragged);  // 5 px: a click so far
+  p.onMotion(5, 0);
+  CHECK(p.onPoll().dragged);  // 10 px
   auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
-  CHECK(e && e->x == 400 && e->y == 300 && p.open() && p.locked());
-  const int queries = c.queries;
+  CHECK(e && e->x == 500 && e->y == 300);  // the window's cursor: the lock point plus 100 counts
   p.onMotion(20, -10);
   auto m = p.onPoll().move;
-  CHECK(m && m->x == 430 && m->y == 290 && m->wheel == WheelKind::Emote);  // the press plus every count since
+  CHECK(m && m->x == 530 && m->y == 290 && m->wheel == WheelKind::Emote);
   CHECK(!p.onPoll().move);  // nothing moved: nothing sent
-  p.onMotion(-30, 0);
-  m = p.onPoll().move;
-  CHECK(m && m->x == 400 && m->y == 290);
   p.onMotion(0, 50);
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
-  CHECK(e && e->x == 400 && e->y == 340 && !p.open() && !p.locked());
-  CHECK(c.queries == queries);  // a locked gesture stops asking the compositor
-  p.onMotion(100, 100);  // motion between gestures counts for nothing
-  c.stuck = {{50, 50}};
+  CHECK(e && e->x == 530 && e->y == 340 && !p.open());
+  p.onMotion(100, 100);  // motion between gestures moves the window's cursor too
+  p.onPoll();
   p.onPress(8);
   e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
-  CHECK(e && e->x == 50 && e->y == 50);
+  CHECK(e && e->x == 630 && e->y == 440);
 }
 
-static void test_linux_a_cursor_that_moves_is_never_locked() {
-  // The compositor follows the mouse, a frame behind: raw motion passes the threshold first, the cursor catches up.
+static void test_linux_lock_noticed_during_a_gesture() {
+  // The pointer got locked just before the press. A poll catches the cursor mid-warp and opens the wheel the usual
+  // way; the next polls find it back on the press while the mouse moves, and the wheel follows the raw motion
+  // from the press, which is where the window's cursor started.
   FakeCursor c;
-  c.answers = {{100, 100}, {100, 100}, {103, 100}, {106, 100}, {112, 100}, {118, 100}};
-  lnx::CursorEmits p(c.query());
-  p.onPress(8);
-  p.onMotion(9, 0);
-  CHECK(!p.onPoll().dragged && !p.locked());  // still at the press: the first still poll
-  p.onMotion(3, 0);
-  CHECK(!p.onPoll().dragged && !p.locked());  // moved to 103: not locked, not past the threshold either
-  p.onMotion(50, 0);
-  CHECK(!p.onPoll().dragged);  // 106
-  CHECK(p.onPoll().dragged && !p.locked());  // 112: the compositor's own threshold
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  p.onMotion(500, 500);  // ignored: the compositor's cursor is the position
-  const auto m = p.onPoll().move;
-  CHECK(m && m->x == 118 && m->y == 100);
-  // A cursor that has moved off the press and stays there is never locked, however far the mouse goes.
-  FakeCursor d;
-  d.answers = {{0, 0}, {1, 0}, {1, 0}, {1, 0}, {1, 0}};
-  lnx::CursorEmits q(d.query());
-  q.onPress(8);
-  q.onMotion(9, 0);
-  for (int i = 0; i < 4; ++i) CHECK(!q.onPoll().dragged && !q.locked());
-}
-
-static void test_linux_a_locked_cursor_caught_mid_warp_still_locks() {
-  // Hyprland moves a locked cursor and warps it back to the press, so a poll can land in between and see it away.
-  // During the press: an answer short of the threshold doesn't reset the count.
-  FakeCursor c;
-  c.answers = {{100, 100}, {100, 100}, {103, 101}, {100, 100}, {100, 100}};
+  c.answers = {{100, 100}, {100, 100}, {300, 250}};
+  c.stuck = {{100, 100}};
   lnx::CursorEmits p(c.query());
   p.onPress(8);
   p.onMotion(30, 0);
   CHECK(!p.onPoll().dragged);  // still 1
-  CHECK(!p.onPoll().dragged);  // (103, 101): caught mid-warp, ignored
-  CHECK(!p.onPoll().dragged);  // still 2
-  CHECK(p.onPoll().dragged && p.locked());  // still 3
-  p.onEmit(Emit{Emit::Kind::Cancel});
-  // An answer past the threshold opens the wheel the usual way; the cursor then keeps coming back to the press
-  // while the mouse moves on, and the gesture turns locked.
-  c.answers = {{100, 100}, {100, 100}, {300, 250}, {100, 100}, {100, 100}, {100, 100}};
-  p.onPress(8);
-  p.onMotion(30, 0);
-  CHECK(!p.onPoll().dragged);
-  CHECK(p.onPoll().dragged && !p.locked());  // (300, 250)
+  p.onMotion(10, 0);
+  CHECK(p.onPoll().dragged && !p.locked());  // (300, 250): a glimpse, taken for a drag
   auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
   CHECK(e && e->x == 100 && e->y == 100);
   p.onMotion(10, 0);
-  CHECK(!p.onPoll().move && !p.locked());  // back on the press: nothing to send yet (the wheel is already there)
+  CHECK(!p.onPoll().move && !p.locked());  // back on the press: the glimpse is forgotten, the cursor is on the wheel
   p.onMotion(10, 0);
-  auto m = p.onPoll().move;
-  CHECK(p.locked() && m && m->x == 150 && m->y == 100);  // twice: locked, and the raw motion since the press shows
-  const int queries = c.queries;
+  CHECK(!p.onPoll().move && !p.locked());  // still once
   p.onMotion(0, 40);
-  m = p.onPoll().move;
-  CHECK(m && m->x == 150 && m->y == 140 && c.queries == queries);
+  auto m = p.onPoll().move;
+  CHECK(p.locked() && m && m->x == 160 && m->y == 140);  // twice: the press plus every count since the press
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
-  CHECK(e && e->x == 150 && e->y == 140);
-  // A wheel held still after it opened doesn't count: the cursor is on the press because the mouse didn't move.
-  c.answers = {{50, 50}, {70, 50}, {50, 50}, {50, 50}, {50, 50}, {50, 50}};
-  p.onPress(8);
-  p.onMotion(20, 0);
-  CHECK(p.onPoll().dragged);
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  for (int i = 0; i < 4; ++i) CHECK(!p.onPoll().move && !p.locked());
+  CHECK(e && e->x == 160 && e->y == 140);
 }
 
 static void test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion() {
-  // The wheel opened on an answer caught mid-warp and was released before the polls could tell: the cursor is
-  // back on the press, but the mouse went 40 counts to the right.
+  // The wheel opened on a glimpse and was released before the tracker could tell: the cursor is back on the
+  // press, but the mouse went 40 counts to the right.
   FakeCursor c;
   c.answers = {{50, 50}, {50, 50}, {200, 200}, {50, 50}};
   lnx::CursorEmits p(c.query());
@@ -1549,6 +1607,31 @@ static void test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion() {
   p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
   CHECK(e && e->x == 50 && e->y == 50);
+}
+
+static void test_linux_config_screens_and_locked_sensitivity() {
+  const Config cur;
+  Command c = parseCommand(R"({"type":"config","screens":"0,0,1920,1080;1920,0,2560,1440","lockedSensitivity":0.8})", cur);
+  CHECK(c.kind == Command::Kind::Config && c.config.screens.size() == 2);
+  CHECK(c.config.screens[1].x == 1920 && c.config.screens[1].width == 2560 && c.config.screens[1].height == 1440);
+  CHECK(c.config.lockedSensitivity == 0.8);
+  c = parseCommand(R"({"type":"config","screens":"-1920,0,1920,1080;"})", cur);  // a leading minus, a trailing ;
+  CHECK(c.config.screens.size() == 1 && c.config.screens[0].x == -1920);
+  c = parseCommand(R"({"type":"config","screens":""})", cur);
+  CHECK(c.config.screens.empty());
+  for (const char* bad : {"0,0,1920", "0,0,1920,1080,5", "a,0,1,1", "0,0,0,1080", "0,0,,1080"}) {
+    c = parseCommand(std::string(R"({"type":"config","screens":")") + bad + "\"}", cur);
+    CHECK(c.kind == Command::Kind::Config && c.config.screens.empty());  // malformed: no screens, not a dead config
+  }
+  Config set;
+  set.lockedSensitivity = 0.5;
+  set.screens = {{0, 0, 1, 1}};
+  c = parseCommand(R"({"type":"config"})", set);  // missing fields keep their current values
+  CHECK(c.config.lockedSensitivity == 0.5 && c.config.screens.size() == 1);
+  c = parseCommand(R"({"type":"config","lockedSensitivity":0})", set);  // out of range: kept
+  CHECK(c.config.lockedSensitivity == 0.5);
+  c = parseCommand(R"({"type":"config","lockedSensitivity":"x"})", set);
+  CHECK(c.config.lockedSensitivity == 0.5);
 }
 
 int main() {
@@ -1636,10 +1719,13 @@ int main() {
   test_linux_cursor_emits_place_a_wheel_gesture();
   test_linux_cursor_emits_click_cancel_and_toggle();
   test_linux_cursor_emits_survive_a_silent_compositor();
-  test_linux_locked_pointer_measures_the_gesture_in_raw_motion();
-  test_linux_a_cursor_that_moves_is_never_locked();
-  test_linux_a_locked_cursor_caught_mid_warp_still_locks();
+  test_linux_tracker_follows_the_compositor_until_the_pointer_is_locked();
+  test_linux_tracker_ignores_a_cursor_caught_mid_warp_but_follows_an_unlock();
+  test_linux_tracker_keeps_a_locked_cursor_on_a_screen_at_the_window_sensitivity();
+  test_linux_locked_pointer_gesture_follows_the_windows_own_cursor();
+  test_linux_lock_noticed_during_a_gesture();
   test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion();
+  test_linux_config_screens_and_locked_sensitivity();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
