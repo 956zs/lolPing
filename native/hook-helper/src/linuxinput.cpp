@@ -1,5 +1,6 @@
 #include "linuxinput.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -210,13 +211,47 @@ bool CursorEmits::where(int& x, int& y) {
   return answered;
 }
 
+void CursorEmits::rawPoint(int& x, int& y) const {
+  x = pressX_ + static_cast<int>(std::lround(static_cast<double>(rawX_) * pxPerCount_));
+  y = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_) * pxPerCount_));
+}
+
+// Pixels per count from a drag the compositor followed. Only a real drag teaches anything: a short one is mostly
+// rounding, and libinput's acceleration makes the ratio depend on speed anyway, so the last drag is as good as any.
+void CursorEmits::learnScale() {
+  constexpr long kMinCounts = 10;
+  constexpr double kMinScale = 0.05, kMaxScale = 20.0;
+  if (locked_ || !pressKnown_) return;
+  const double counts = std::hypot(static_cast<double>(rawX_), static_cast<double>(rawY_));
+  if (counts < kMinCounts || !movedPastThreshold(pressX_, pressY_, knownX_, knownY_, thresholdPx_)) return;
+  const double px = std::hypot(static_cast<double>(knownX_ - pressX_), static_cast<double>(knownY_ - pressY_));
+  pxPerCount_ = std::min(kMaxScale, std::max(kMinScale, px / counts));
+}
+
+void CursorEmits::gestureEnded() {
+  learnScale();
+  pending_ = false;
+  open_ = false;
+  locked_ = false;
+}
+
 void CursorEmits::onPress(int thresholdPx) {
   pressKnown_ = where(pressX_, pressY_);
   thresholdPx_ = thresholdPx;
   pending_ = true;
+  locked_ = false;
+  stillPolls_ = 0;
+  rawX_ = 0;
+  rawY_ = 0;
 }
 
-void CursorEmits::onPressEnded() { pending_ = false; }
+void CursorEmits::onPressEnded() { gestureEnded(); }
+
+void CursorEmits::onMotion(int dx, int dy) {
+  if (!polling()) return;
+  rawX_ += dx;
+  rawY_ += dy;
+}
 
 std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
   Emit out = e;
@@ -231,19 +266,19 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
       sentY_ = pressY_;
       return out;
     case Emit::Kind::Click:
-      pending_ = false;
       out.x = pressX_;
       out.y = pressY_;
+      gestureEnded();
       return out;
     case Emit::Kind::WheelMove:
       return std::nullopt;  // the poll sends real positions instead
     case Emit::Kind::WheelRelease:
-      open_ = false;
-      where(out.x, out.y);
+      if (locked_) rawPoint(out.x, out.y);
+      else where(out.x, out.y);
+      gestureEnded();
       return out;
     case Emit::Kind::Cancel:
-      pending_ = false;
-      open_ = false;
+      gestureEnded();
       return out;
     case Emit::Kind::Toggled:
       return out;
@@ -255,9 +290,14 @@ CursorEmits::Poll CursorEmits::onPoll() {
   Poll p;
   int x = 0;
   int y = 0;
-  if (!polling() || !query_ || !query_(x, y)) return p;
-  knownX_ = x;
-  knownY_ = y;
+  if (!polling()) return p;
+  if (locked_) {  // the compositor's cursor stays put: the raw motion is the only position there is
+    rawPoint(x, y);
+  } else {
+    if (!query_ || !query_(x, y)) return p;
+    knownX_ = x;
+    knownY_ = y;
+  }
   if (pending_) {
     if (!pressKnown_) {  // no answer at the press: measure from the first one
       pressX_ = x;
@@ -266,6 +306,21 @@ CursorEmits::Poll CursorEmits::onPoll() {
     } else if (movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_)) {
       pending_ = false;  // once: the wheel's open emit or the press's end comes next
       p.dragged = true;
+    } else {
+      int rx = 0;
+      int ry = 0;
+      rawPoint(rx, ry);
+      // The mouse has moved far enough but the cursor hasn't moved at all: a locked pointer, once it has stayed
+      // that way longer than a compositor that is merely behind.
+      if (x == pressX_ && y == pressY_ && movedPastThreshold(pressX_, pressY_, rx, ry, thresholdPx_)) {
+        if (++stillPolls_ > kLockConfirmPolls) {
+          locked_ = true;
+          pending_ = false;
+          p.dragged = true;
+        }
+      } else {
+        stillPolls_ = 0;
+      }
     }
     return p;
   }

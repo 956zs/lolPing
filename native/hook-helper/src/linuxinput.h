@@ -98,9 +98,19 @@ Result ungrabbedRelease(Decision& d, Btn btn, uint64_t timeMs);
 // Gives Decision's emits their screen positions and measures the drag threshold on screen (docs/design-linux.md
 // §2.5). evdev only reports relative motion, in device counts; the compositor knows where the cursor is. The cursor
 // thread calls this in the order the event thread queued presses and emits, and polls it every 8 ms while polling().
+//
+// A window that locks the pointer (SDL's relative mouse mode, which osu!lazer uses for its high precision mouse)
+// stops the compositor's cursor for good: it answers the press position however far the mouse moves. When that
+// happens, the gesture is measured in raw motion instead, scaled by the pixels-per-count ratio of the last drag the
+// compositor did follow.
 class CursorEmits {
  public:
   using Query = std::function<bool(int& x, int& y)>;  // asks the compositor; false when it didn't answer
+
+  // Polls the compositor must stay exactly at the press after raw motion passed the threshold, before the pointer
+  // counts as locked. A busy compositor can be a frame behind the mouse; a locked one never catches up.
+  static constexpr int kLockConfirmPolls = 2;
+  static constexpr double kDefaultPxPerCount = 1.0;  // libinput's unit is about one pixel at 1000 DPI
 
   explicit CursorEmits(Query query) : query_(std::move(query)) {}
 
@@ -109,6 +119,8 @@ class CursorEmits {
   void onPress(int thresholdPx);
   // The pending press ended without an emit that says so (a replayed click, or the trigger let go).
   void onPressEnded();
+  // Raw mouse motion since the last call, in device counts. Only counted while a press is pending or a wheel open.
+  void onMotion(int dx, int dy);
   // One of Decision's emits with its position filled in, or nothing: Decision's own wheelMoves are dropped.
   std::optional<Emit> onEmit(const Emit& e);
 
@@ -119,19 +131,29 @@ class CursorEmits {
   Poll onPoll();
   bool polling() const { return open_ || pending_; }
   bool open() const { return open_; }
+  // The current gesture is measured in raw motion because the compositor's cursor stayed at the press.
+  bool locked() const { return locked_; }
+  double pxPerCount() const { return pxPerCount_; }
 
  private:
   bool where(int& x, int& y);  // asks the compositor, or falls back to its last answer (false)
+  void rawPoint(int& x, int& y) const;  // the press plus the scaled raw motion since
+  void learnScale();                    // at the end of a gesture the compositor followed
+  void gestureEnded();
 
   Query query_;
   bool open_ = false;
   bool pending_ = false;
   bool pressKnown_ = false;  // the compositor answered at the press; if not, the first poll that gets an answer sets it
+  bool locked_ = false;
+  int stillPolls_ = 0;  // polls in a row with raw motion past the threshold and the compositor still at the press
   int thresholdPx_ = 0;
   WheelKind wheel_ = WheelKind::Ping;
   int pressX_ = 0, pressY_ = 0;
   int sentX_ = 0, sentY_ = 0;    // the last point sent while open
   int knownX_ = 0, knownY_ = 0;  // the compositor's last answer
+  long rawX_ = 0, rawY_ = 0;     // raw motion since the press, in counts
+  double pxPerCount_ = kDefaultPxPerCount;
 };
 
 }  // namespace lp::lnx

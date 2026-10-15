@@ -7,6 +7,7 @@
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -1210,14 +1211,21 @@ static void test_linux_parse_cursor_pos() {
 }
 
 namespace {
-// A compositor that answers with the given positions, one per query, then stops answering.
+// A compositor that answers with the given positions, one per query, then stops answering, or keeps answering
+// `stuck` (a locked pointer) once the list is used up.
 struct FakeCursor {
   std::deque<std::pair<int, int>> answers;
+  std::optional<std::pair<int, int>> stuck;
   int queries = 0;
   lnx::CursorEmits::Query query() {
     return [this](int& x, int& y) {
       ++queries;
-      if (answers.empty()) return false;
+      if (answers.empty()) {
+        if (!stuck) return false;
+        x = stuck->first;
+        y = stuck->second;
+        return true;
+      }
       x = answers.front().first;
       y = answers.front().second;
       answers.pop_front();
@@ -1421,6 +1429,116 @@ static void test_linux_cursor_emits_survive_a_silent_compositor() {
   CHECK(!none.onPoll().move);
 }
 
+static void test_linux_locked_pointer_measures_the_gesture_in_raw_motion() {
+  // osu!lazer locks the pointer: the compositor answers the press position however far the mouse moves.
+  FakeCursor c;
+  c.stuck = {{400, 300}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);
+  p.onMotion(5, 0);
+  CHECK(!p.onPoll().dragged && !p.locked());  // 5 counts: not a drag in any unit
+  p.onMotion(5, 0);                           // 10 counts, 10 px at the default scale
+  for (int i = 0; i < lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged && !p.locked());
+  CHECK(p.onPoll().dragged && p.locked() && !p.polling());  // the cursor never moved: locked
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0, WheelKind::Emote));
+  CHECK(e && e->x == 400 && e->y == 300 && p.open() && p.locked());
+  const int queries = c.queries;
+  p.onMotion(20, -10);
+  auto m = p.onPoll().move;
+  CHECK(m && m->x == 430 && m->y == 290 && m->wheel == WheelKind::Emote);  // the press plus every count since
+  CHECK(!p.onPoll().move);  // nothing moved: nothing sent
+  p.onMotion(-30, 0);
+  m = p.onPoll().move;
+  CHECK(m && m->x == 400 && m->y == 290);
+  p.onMotion(0, 50);
+  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(e && e->x == 400 && e->y == 340 && !p.open() && !p.locked());
+  CHECK(c.queries == queries);  // a locked gesture stops asking the compositor
+  p.onMotion(100, 100);  // motion between gestures counts for nothing
+  c.stuck = {{50, 50}};
+  p.onPress(8);
+  e = p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
+  CHECK(e && e->x == 50 && e->y == 50);
+}
+
+static void test_linux_a_cursor_that_moves_is_never_locked() {
+  // The compositor follows the mouse, a frame behind: raw motion passes the threshold first, the cursor catches up.
+  FakeCursor c;
+  c.answers = {{100, 100}, {100, 100}, {103, 100}, {106, 100}, {112, 100}, {118, 100}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);
+  p.onMotion(9, 0);
+  CHECK(!p.onPoll().dragged && !p.locked());  // still at the press: the first still poll
+  p.onMotion(3, 0);
+  CHECK(!p.onPoll().dragged && !p.locked());  // moved to 103: not locked, not past the threshold either
+  p.onMotion(50, 0);
+  CHECK(!p.onPoll().dragged);  // 106
+  CHECK(p.onPoll().dragged && !p.locked());  // 112: the compositor's own threshold
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  p.onMotion(500, 500);  // ignored: the compositor's cursor is the position
+  const auto m = p.onPoll().move;
+  CHECK(m && m->x == 118 && m->y == 100);
+  // A cursor that moves by one pixel at the wrong moment resets the count: the lock needs an unbroken run.
+  FakeCursor d;
+  d.answers = {{0, 0}, {0, 0}, {0, 0}, {1, 0}, {1, 0}, {1, 0}};
+  lnx::CursorEmits q(d.query());
+  q.onPress(8);
+  q.onMotion(9, 0);
+  CHECK(!q.onPoll().dragged && !q.onPoll().dragged);  // two still polls
+  CHECK(!q.onPoll().dragged && !q.locked());          // moved to (1, 0): the run is broken
+  CHECK(!q.onPoll().dragged && !q.onPoll().dragged && !q.locked());  // (1, 0) is not the press: never locked
+}
+
+static void test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed() {
+  // 80 counts moved the cursor 40 px: half a pixel per count. A locked gesture then measures in that scale.
+  FakeCursor c;
+  c.answers = {{0, 0}, {0, 0}, {40, 0}, {40, 0}};
+  lnx::CursorEmits p(c.query());
+  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);
+  p.onPress(8);
+  p.onMotion(30, 0);
+  CHECK(!p.onPoll().dragged);  // (0, 0)
+  p.onMotion(50, 0);
+  CHECK(p.onPoll().dragged);  // (40, 0)
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  const auto e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));  // asks: (40, 0)
+  CHECK(e && e->x == 40 && p.pxPerCount() == 0.5);
+  c.stuck = {{200, 200}};
+  p.onPress(8);
+  p.onMotion(16, 0);  // 8 px: exactly the threshold, not past it
+  for (int i = 0; i <= lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged);
+  p.onMotion(2, 0);  // 9 px
+  for (int i = 0; i < lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged);
+  CHECK(p.onPoll().dragged && p.locked());
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  p.onMotion(0, 60);
+  const auto m = p.onPoll().move;
+  CHECK(m && m->x == 209 && m->y == 230);
+  p.onEmit(Emit{Emit::Kind::Cancel});
+  CHECK(!p.locked() && p.pxPerCount() == 0.5);  // a locked gesture teaches nothing
+  // Clicks and short drags teach nothing either; the scale is clamped to a sane range.
+  c.stuck.reset();
+  c.answers = {{0, 0}, {0, 0}, {3, 0}, {3, 0}};
+  p.onPress(8);
+  p.onMotion(200, 0);
+  p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
+  CHECK(p.pxPerCount() == 0.5);  // the cursor didn't pass the threshold
+  p.onPress(8);
+  p.onMotion(5, 0);
+  c.answers = {{30, 0}, {30, 0}};
+  CHECK(p.onPoll().dragged);
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(p.pxPerCount() == 0.5);  // 5 counts is too few to measure
+  c.answers = {{0, 0}, {0, 0}, {1000, 0}, {1000, 0}};
+  p.onPress(8);
+  p.onMotion(10, 0);
+  CHECK(!p.onPoll().dragged && p.onPoll().dragged);
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(p.pxPerCount() == 20.0);  // 100 px per count, clamped
+}
+
 int main() {
   test_json_parses_flat_objects();
   test_json_rejects_bad_input();
@@ -1506,6 +1624,9 @@ int main() {
   test_linux_cursor_emits_place_a_wheel_gesture();
   test_linux_cursor_emits_click_cancel_and_toggle();
   test_linux_cursor_emits_survive_a_silent_compositor();
+  test_linux_locked_pointer_measures_the_gesture_in_raw_motion();
+  test_linux_a_cursor_that_moves_is_never_locked();
+  test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
