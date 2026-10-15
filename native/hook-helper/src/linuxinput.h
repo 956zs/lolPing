@@ -101,8 +101,7 @@ Result ungrabbedRelease(Decision& d, Btn btn, uint64_t timeMs);
 //
 // A window that locks the pointer (SDL's relative mouse mode, which osu!lazer uses for its high precision mouse)
 // stops the compositor's cursor for good: it answers the press position however far the mouse moves. When that
-// happens, the gesture is measured in raw motion instead, scaled by the pixels-per-count ratio of the last drag the
-// compositor did follow.
+// happens, the gesture is measured in raw motion instead, one pixel per count.
 class CursorEmits {
  public:
   using Query = std::function<bool(int& x, int& y)>;  // asks the compositor; false when it didn't answer
@@ -114,7 +113,10 @@ class CursorEmits {
   // Polls of an open wheel that find the cursor back exactly on the press while the mouse moved, before the
   // gesture counts as locked: Hyprland moves a locked cursor and warps it back, so a poll can catch it away.
   static constexpr int kReturnPolls = 2;
-  static constexpr double kDefaultPxPerCount = 1.0;  // libinput's unit is about one pixel at 1000 DPI
+  // libinput's unit is about one pixel at 1000 DPI. The ratio could be measured from drags the compositor follows,
+  // but a quick click measures it wrong (the last answer is stale, the counts are not), and a wrong ratio makes the
+  // drag threshold unreachable; the direction is what the wheel needs, and that holds for any ratio.
+  static constexpr double kPxPerCount = 1.0;
 
   explicit CursorEmits(Query query) : query_(std::move(query)) {}
 
@@ -137,14 +139,12 @@ class CursorEmits {
   bool open() const { return open_; }
   // The current gesture is measured in raw motion because the compositor's cursor stayed at the press.
   bool locked() const { return locked_; }
-  double pxPerCount() const { return pxPerCount_; }
 
  private:
   bool where(int& x, int& y);  // asks the compositor, or falls back to its last answer (false)
   void rawPoint(int& x, int& y) const;  // the press plus the scaled raw motion since
   bool rawPastThreshold() const;
   bool atPress(int x, int y) const;
-  void learnScale();  // at the end of a gesture the compositor followed
   void gestureEnded();
 
   Query query_;
@@ -161,7 +161,6 @@ class CursorEmits {
   int sentX_ = 0, sentY_ = 0;    // the last point sent while open
   int knownX_ = 0, knownY_ = 0;  // the compositor's last answer
   long rawX_ = 0, rawY_ = 0;     // raw motion since the press, in counts
-  double pxPerCount_ = kDefaultPxPerCount;
 };
 
 }  // namespace lp::lnx

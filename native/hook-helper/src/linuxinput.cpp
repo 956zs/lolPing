@@ -1,6 +1,5 @@
 #include "linuxinput.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -212,8 +211,8 @@ bool CursorEmits::where(int& x, int& y) {
 }
 
 void CursorEmits::rawPoint(int& x, int& y) const {
-  x = pressX_ + static_cast<int>(std::lround(static_cast<double>(rawX_) * pxPerCount_));
-  y = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_) * pxPerCount_));
+  x = pressX_ + static_cast<int>(std::lround(static_cast<double>(rawX_) * kPxPerCount));
+  y = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_) * kPxPerCount));
 }
 
 bool CursorEmits::rawPastThreshold() const {
@@ -225,21 +224,7 @@ bool CursorEmits::rawPastThreshold() const {
 
 bool CursorEmits::atPress(int x, int y) const { return pressKnown_ && x == pressX_ && y == pressY_; }
 
-// Pixels per count from a drag the compositor followed. Only a real drag teaches anything: a short one is mostly
-// rounding, and libinput's acceleration makes the ratio depend on speed anyway, so the last drag is as good as any.
-// A gesture that showed any sign of a locked pointer teaches nothing: its answers were the warp, not the mouse.
-void CursorEmits::learnScale() {
-  constexpr long kMinCounts = 10;
-  constexpr double kMinScale = 0.05, kMaxScale = 20.0;
-  if (locked_ || !pressKnown_ || returnPolls_ > 0 || atPress(knownX_, knownY_)) return;
-  const double counts = std::hypot(static_cast<double>(rawX_), static_cast<double>(rawY_));
-  if (counts < kMinCounts || !movedPastThreshold(pressX_, pressY_, knownX_, knownY_, thresholdPx_)) return;
-  const double px = std::hypot(static_cast<double>(knownX_ - pressX_), static_cast<double>(knownY_ - pressY_));
-  pxPerCount_ = std::min(kMaxScale, std::max(kMinScale, px / counts));
-}
-
 void CursorEmits::gestureEnded() {
-  learnScale();
   pending_ = false;
   open_ = false;
   locked_ = false;

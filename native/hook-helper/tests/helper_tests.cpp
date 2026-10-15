@@ -1520,7 +1520,6 @@ static void test_linux_a_locked_cursor_caught_mid_warp_still_locks() {
   CHECK(m && m->x == 150 && m->y == 140 && c.queries == queries);
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
   CHECK(e && e->x == 150 && e->y == 140);
-  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);  // nothing learned from a gesture like that
   // A wheel held still after it opened doesn't count: the cursor is on the press because the mouse didn't move.
   c.answers = {{50, 50}, {70, 50}, {50, 50}, {50, 50}, {50, 50}, {50, 50}};
   p.onPress(8);
@@ -1542,7 +1541,6 @@ static void test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion() {
   p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
   auto e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
   CHECK(e && e->x == 90 && e->y == 50);
-  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);  // the answer on the press teaches nothing
   // Released on the press after a mouse move too short for a drag: the compositor's answer stands.
   c.answers = {{50, 50}, {50, 50}, {200, 200}, {50, 50}};
   p.onPress(8);
@@ -1551,56 +1549,6 @@ static void test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion() {
   p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
   e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
   CHECK(e && e->x == 50 && e->y == 50);
-}
-
-static void test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed() {
-  // 80 counts moved the cursor 40 px: half a pixel per count. A locked gesture then measures in that scale.
-  FakeCursor c;
-  c.answers = {{0, 0}, {0, 0}, {40, 0}, {40, 0}};
-  lnx::CursorEmits p(c.query());
-  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);
-  p.onPress(8);
-  p.onMotion(30, 0);
-  CHECK(!p.onPoll().dragged);  // (0, 0)
-  p.onMotion(50, 0);
-  CHECK(p.onPoll().dragged);  // (40, 0)
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  const auto e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));  // asks: (40, 0)
-  CHECK(e && e->x == 40 && p.pxPerCount() == 0.5);
-  c.stuck = {{200, 200}};
-  p.onPress(8);
-  p.onMotion(16, 0);  // 8 px: exactly the threshold, not past it
-  for (int i = 0; i <= lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged);
-  p.onMotion(2, 0);  // 9 px
-  for (int i = 0; i < lnx::CursorEmits::kLockConfirmPolls; ++i) CHECK(!p.onPoll().dragged);
-  CHECK(p.onPoll().dragged && p.locked());
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  p.onMotion(0, 60);
-  const auto m = p.onPoll().move;
-  CHECK(m && m->x == 209 && m->y == 230);
-  p.onEmit(Emit{Emit::Kind::Cancel});
-  CHECK(!p.locked() && p.pxPerCount() == 0.5);  // a locked gesture teaches nothing
-  // Clicks and short drags teach nothing either; the scale is clamped to a sane range.
-  c.stuck.reset();
-  c.answers = {{0, 0}, {0, 0}, {3, 0}, {3, 0}};
-  p.onPress(8);
-  p.onMotion(200, 0);
-  p.onEmit(pointEmit(Emit::Kind::Click, 0, 0));
-  CHECK(p.pxPerCount() == 0.5);  // the cursor didn't pass the threshold
-  p.onPress(8);
-  p.onMotion(5, 0);
-  c.answers = {{30, 0}, {30, 0}};
-  CHECK(p.onPoll().dragged);
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
-  CHECK(p.pxPerCount() == 0.5);  // 5 counts is too few to measure
-  c.answers = {{0, 0}, {0, 0}, {1000, 0}, {1000, 0}};
-  p.onPress(8);
-  p.onMotion(10, 0);
-  CHECK(!p.onPoll().dragged && p.onPoll().dragged);
-  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
-  p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
-  CHECK(p.pxPerCount() == 20.0);  // 100 px per count, clamped
 }
 
 int main() {
@@ -1690,7 +1638,6 @@ int main() {
   test_linux_cursor_emits_survive_a_silent_compositor();
   test_linux_locked_pointer_measures_the_gesture_in_raw_motion();
   test_linux_a_cursor_that_moves_is_never_locked();
-  test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed();
   test_linux_a_locked_cursor_caught_mid_warp_still_locks();
   test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
