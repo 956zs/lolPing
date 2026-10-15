@@ -123,10 +123,19 @@ class CursorThread {
   CursorThread& operator=(const CursorThread&) = delete;
 
   void press(uint64_t seq, int thresholdPx) {
+    // Same thread as motion(): nothing from before the press is counted against it.
+    dx_.store(0, std::memory_order_relaxed);
+    dy_.store(0, std::memory_order_relaxed);
     push(Item{Item::Kind::Press, Emit{Emit::Kind::Cancel}, seq, thresholdPx});
   }
   void pressEnded() { push(Item{Item::Kind::PressEnded, Emit{Emit::Kind::Cancel}, 0, 0}); }
   void emit(const Emit& e) { push(Item{Item::Kind::Emit, e, 0, 0}); }
+  // Raw motion of the gesture's mice, in counts. Added up here and read at the next poll: a wake-up per mouse frame
+  // would cost more than the 8 ms poll it would save.
+  void motion(int dx, int dy) {
+    dx_.fetch_add(dx, std::memory_order_relaxed);
+    dy_.fetch_add(dy, std::memory_order_relaxed);
+  }
   // The press that has moved past its threshold since the last call, 0 for none.
   uint64_t takeDragged() { return dragged_.exchange(0); }
   // Sends what is queued, then joins.
@@ -172,19 +181,24 @@ class CursorThread {
         q_.pop_front();
       }
       lk.unlock();
+      // The motion that arrived before an emit belongs to the gesture it ends; after a press, to the one it starts.
       if (item && item->kind == Item::Kind::Press) {
         placer.onPress(item->thresholdPx);
+        drainMotion(placer);
         pressSeq = item->seq;
         nextPoll = Clock::now() + kCursorPoll;
       } else if (item && item->kind == Item::Kind::PressEnded) {
+        drainMotion(placer);
         placer.onPressEnded();
       } else if (item) {
+        drainMotion(placer);
         if (const auto e = placer.onEmit(item->emit)) {
           out_.emit(*e);
           if (e->kind == Emit::Kind::WheelOpen) nextPoll = Clock::now();  // the first move right behind the open
         }
       }
       if (placer.polling() && Clock::now() >= nextPoll) {
+        drainMotion(placer);
         const lnx::CursorEmits::Poll p = placer.onPoll();
         if (p.move) out_.emit(*p.move);
         if (p.dragged) wake(pressSeq);
@@ -192,6 +206,12 @@ class CursorThread {
       }
       lk.lock();
     }
+  }
+
+  void drainMotion(lnx::CursorEmits& placer) {
+    const int dx = dx_.exchange(0, std::memory_order_relaxed);
+    const int dy = dy_.exchange(0, std::memory_order_relaxed);
+    if (dx != 0 || dy != 0) placer.onMotion(dx, dy);
   }
 
   void wake(uint64_t seq) {
@@ -205,6 +225,7 @@ class CursorThread {
   Output& out_;
   int wakeFd_;
   std::atomic<uint64_t> dragged_{0};
+  std::atomic<int> dx_{0}, dy_{0};
   std::mutex mu_;
   std::condition_variable cv_;
   std::deque<Item> q_;
@@ -288,6 +309,7 @@ struct Device {
   uint64_t grabAfterMs = 0;          // clone made, real mouse not grabbed yet
   std::vector<input_event> frame;    // passed events of the current frame, written at its SYN_REPORT
   bool moved = false;                // the current frame has motion Decision hasn't seen
+  int dx = 0, dy = 0;                // that motion, in counts
 };
 
 Decision* g_decision = nullptr;
@@ -368,6 +390,8 @@ void release(Device& d) {
   }
   d.frame.clear();
   d.moved = false;
+  d.dx = 0;
+  d.dy = 0;
 }
 
 // Every key and button the device holds, as libevdev last saw it.
@@ -434,10 +458,14 @@ void feedKeys(const std::vector<lnx::KeyTransition>& keys) {
 
 // Decision's coordinates stay at (0, 0). Raw motion is in device counts, which depend on DPI and acceleration, so the
 // drag threshold is measured in screen pixels by the cursor thread instead; it asks for openWheel() once the pending
-// press has moved far enough. These moves still keep Decision's stale-gesture timer going.
+// press has moved far enough. The cursor thread also gets the counts, for a pointer the compositor doesn't move.
+// These moves still keep Decision's stale-gesture timer going.
 void feedMotion(Device& d) {
   if (!d.moved) return;
   d.moved = false;
+  if (g_pressPending || g_decision->state() == Decision::State::Wheel) g_cursor->motion(d.dx, d.dy);
+  d.dx = 0;
+  d.dy = 0;
   InputEvent e;
   e.kind = EvKind::MouseMove;
   e.timeMs = nowMs();
@@ -484,7 +512,10 @@ void handleEvent(Device& d, const input_event& ev) {
     feedMotion(d);
     flushFrame(d);
   } else {
-    if (ev.type == EV_REL && (ev.code == REL_X || ev.code == REL_Y)) d.moved = true;
+    if (ev.type == EV_REL && (ev.code == REL_X || ev.code == REL_Y)) {
+      d.moved = true;
+      (ev.code == REL_X ? d.dx : d.dy) += ev.value;
+    }
     d.frame.push_back(ev);
   }
 }
