@@ -46,7 +46,7 @@ describe('InputBridge', () => {
     const b = bridge('echo');
     b.send({
       type: 'config', trigger: 'alt', triggerVk: 0, clickPing: false, gameCheck: true, emoteTrigger: 'ctrl', emoteTriggerVk: 0, emoteClick: false,
-      dragThresholdPx: 8, toggleMods: 3, toggleVk: 80, enabled: true,
+      dragThresholdPx: 8, toggleMods: 3, toggleVk: 80, enabled: true, lockedSensitivity: 1,
     });
     const echoed = waitFor<HelperEvent>(b, 'event', (e) => e.type === 'error' && e.message === 'got:config');
     b.start();

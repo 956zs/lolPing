@@ -160,6 +160,10 @@ function SettingsPage({ settings: s, status, update }: { settings: Settings; sta
         </SettingRow>
         <SliderRow limit="dragThresholdPx" icon={<ArrowMove24Regular />} title={t.dragDistance} description={t.dragDistanceDesc}
           value={s.dragThresholdPx} format={(v) => `${v} ${LENGTH_UNIT}`} onChange={(v) => void update({ dragThresholdPx: v })} dim={off} />
+        {PLATFORM === 'linux' && ( // only the Linux helper follows a locked pointer
+          <SliderRow limit="lockedPointerSensitivity" icon={<Games24Regular />} title={t.lockedSensitivity} description={t.lockedSensitivityDesc}
+            value={s.lockedPointerSensitivity} format={(v) => v.toFixed(2)} onChange={(v) => void update({ lockedPointerSensitivity: v })} dim={off} />
+        )}
         <SwitchRow icon={<CursorClick24Regular />} title={t.clickPing(trigger)}
           description={t.clickPingDesc(trigger)}
           checked={s.clickPing} onChange={(v) => void update({ clickPing: v })} dim={off} />

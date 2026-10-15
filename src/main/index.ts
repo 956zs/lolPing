@@ -7,7 +7,7 @@ import { resolveLang, strings, type Strings } from '../shared/i18n';
 import { SETTINGS_CH, type About, type AppStatus } from '../shared/ipc';
 import { announcedEmoteHashes } from '../shared/emotes';
 import { hotkeyLabel } from '../shared/keys';
-import { accessProblemOf, configCommand, type HelperStatus } from '../shared/protocol';
+import { accessProblemOf, configCommand, type HelperCommand, type HelperStatus } from '../shared/protocol';
 import type { RoomState } from '../shared/room';
 import { formatRoomCode, parseRoomCode } from '../shared/roomCode';
 import { overlaySettings, type Settings } from '../shared/settings';
@@ -95,6 +95,9 @@ function start(): void {
   // The language setting, or the system display language when it's 'auto'.
   const text = (): Strings => strings(resolveLang(settings.language, app.getLocale()), PLATFORM);
   let enabled = settings.enabledOnStart;
+  // The Linux helper keeps a locked pointer on a screen: it gets the screens in layout pixels, which are Electron's DIPs.
+  const helperConfig = (s: Settings, on: boolean): HelperCommand =>
+    configCommand(s, on, IS_LINUX ? screen.getAllDisplays().map((d) => d.bounds) : undefined);
   let quitting = false; // read by pushStatus: once true, the tray and overlays are gone
   let capturing = false; // the settings page is listening for a key, so the helper must stay suspended
 
@@ -353,7 +356,7 @@ function start(): void {
   function setEnabled(on: boolean): void {
     if (on === enabled) return;
     enabled = on;
-    bridge.send(configCommand(store.get(), enabled)); // also refreshes the config re-sent after restarts
+    bridge.send(helperConfig(store.get(), enabled)); // also refreshes the config re-sent after restarts
     const t = text();
     overlays.toast(on ? t.toastOn : t.toastOff, t.toastToggleHint(hotkeyLabel(store.get().toggleHotkey, PLATFORM)));
     syncRoomFlags();
@@ -408,7 +411,7 @@ function start(): void {
   store.on('change', (s: Settings) => {
     const previous = settings;
     settings = s;
-    bridge.send(configCommand(s, enabled));
+    bridge.send(helperConfig(s, enabled));
     overlays.updateSettings(overlaySettings(s));
     settingsWindow()?.webContents.send(SETTINGS_CH.changed, s);
     if (s.language !== previous.language) tray.setText(text());
@@ -477,7 +480,13 @@ function start(): void {
     bridge.send({ type: 'suspend', on: false });
   });
 
-  bridge.send(configCommand(settings, enabled));
+  bridge.send(helperConfig(settings, enabled));
+  if (IS_LINUX) {  // the helper keeps a locked pointer on a screen, so it needs the screens
+    const resend = (): void => bridge.send(helperConfig(settings, enabled));
+    screen.on('display-added', resend);
+    screen.on('display-removed', resend);
+    screen.on('display-metrics-changed', resend);
+  }
   if (trusted()) bridge.start();
   else waitForAccess();
   pushStatus();

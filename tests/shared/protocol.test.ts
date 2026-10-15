@@ -39,8 +39,16 @@ describe('commands', () => {
     expect(configCommand(DEFAULT_SETTINGS, true)).toEqual({
       type: 'config', trigger: 'alt', triggerVk: 0, clickPing: false, gameCheck: true,
       emoteTrigger: 'ctrl', emoteTriggerVk: 0, emoteClick: false, dragThresholdPx: 8,
-      toggleMods: 3, toggleVk: 0x50, enabled: true,
+      toggleMods: 3, toggleVk: 0x50, enabled: true, lockedSensitivity: 1,
     });
+  });
+
+  it('sends the screens flat, and only when given', () => {
+    const screens = [{ x: 0, y: 0, width: 1920, height: 1080 }, { x: 1920, y: -0.4, width: 2560.2, height: 1440 }];
+    expect(configCommand({ ...DEFAULT_SETTINGS, lockedPointerSensitivity: 0.8 }, true, screens))
+      .toMatchObject({ lockedSensitivity: 0.8, screens: '0,0,1920,1080;1920,0,2560,1440' });
+    expect(configCommand(DEFAULT_SETTINGS, true, [])).toMatchObject({ screens: '' });
+    expect(configCommand(DEFAULT_SETTINGS, true)).not.toHaveProperty('screens');
   });
 
   it('builds a config command for a custom key trigger', () => {

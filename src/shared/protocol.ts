@@ -89,12 +89,23 @@ export type HelperCommand =
       toggleMods: number;
       toggleVk: number;
       enabled: boolean;
+      /** Linux: a window that locks the pointer moves its own cursor this far per mouse count. */
+      lockedSensitivity: number;
+      /** Linux: the screens as "x,y,width,height;…" in layout pixels, to keep that cursor on one. */
+      screens?: string;
     }
   | { type: 'setEnabled'; enabled: boolean }
   | { type: 'suspend'; on: boolean }
   | { type: 'shutdown' };
 
-export function configCommand(s: Settings, enabled: boolean): HelperCommand {
+export interface ScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function configCommand(s: Settings, enabled: boolean, screens?: readonly ScreenRect[]): HelperCommand {
   const t = s.trigger;
   const e = s.emoteTrigger;
   return {
@@ -110,6 +121,8 @@ export function configCommand(s: Settings, enabled: boolean): HelperCommand {
     toggleMods: s.toggleHotkey.mods,
     toggleVk: s.toggleHotkey.vk,
     enabled,
+    lockedSensitivity: s.lockedPointerSensitivity,
+    ...(screens ? { screens: screens.map((r) => [r.x, r.y, r.width, r.height].map(Math.round).join(',')).join(';') } : {}),
   };
 }
 

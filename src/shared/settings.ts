@@ -34,6 +34,8 @@ export interface Settings {
   enabledOnStart: boolean;
   trigger: TriggerKey;
   dragThresholdPx: number;
+  /** Linux: how far a window that locks the pointer moves its own cursor per mouse count (its mouse sensitivity). */
+  lockedPointerSensitivity: number;
   clickPing: boolean;
   /** Which ping trigger + click places. */
   clickPingId: PingId;
@@ -90,6 +92,7 @@ export const DEFAULT_SETTINGS: Settings = {
   enabledOnStart: true,
   trigger: 'alt',
   dragThresholdPx: 8,
+  lockedPointerSensitivity: 1,
   clickPing: false,
   gameCheck: true,
   clickPingId: DEFAULT_CLICK_PING,
@@ -123,6 +126,7 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export const LIMITS = {
   dragThresholdPx: { min: 2, max: 40, step: 1 },
+  lockedPointerSensitivity: { min: 0.1, max: 5, step: 0.05 },
   pingSizePx: { min: 60, max: 220, step: 1 },
   pingDurationS: { min: 1, max: 8, step: 0.1 },
   volume: { min: 0, max: 100, step: 1 },
@@ -141,7 +145,7 @@ function num(raw: unknown, key: NumKey): number {
   const { min, max, step } = LIMITS[key];
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_SETTINGS[key];
   const clamped = Math.min(max, Math.max(min, raw));
-  return Number((Math.round(clamped / step) * step).toFixed(step < 1 ? 1 : 0));
+  return Number((Math.round(clamped / step) * step).toFixed(step < 0.1 ? 2 : step < 1 ? 1 : 0));
 }
 
 const bool = (raw: unknown, key: BoolKey): boolean => (typeof raw === 'boolean' ? raw : DEFAULT_SETTINGS[key]);
@@ -229,6 +233,7 @@ export function normalizeSettings(raw: unknown, platform: Platform = 'win', iden
     enabledOnStart: bool(r.enabledOnStart, 'enabledOnStart'),
     trigger: pingTrigger,
     dragThresholdPx: num(r.dragThresholdPx, 'dragThresholdPx'),
+    lockedPointerSensitivity: num(r.lockedPointerSensitivity, 'lockedPointerSensitivity'),
     clickPing: bool(r.clickPing, 'clickPing'),
     gameCheck: bool(r.gameCheck, 'gameCheck'),
     clickPingId: isPingId(r.clickPingId) ? r.clickPingId : DEFAULT_CLICK_PING,

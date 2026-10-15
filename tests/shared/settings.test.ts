@@ -20,11 +20,14 @@ describe('normalizeSettings', () => {
   });
 
   it('clamps and rounds numbers to their limits', () => {
-    const s = normalizeSettings({ dragThresholdPx: 0, pingSizePx: 999, pingDurationS: 3.27, volume: 55.6 });
+    const s = normalizeSettings({ dragThresholdPx: 0, pingSizePx: 999, pingDurationS: 3.27, volume: 55.6, lockedPointerSensitivity: 0.826 });
     expect(s.dragThresholdPx).toBe(2);
     expect(s.pingSizePx).toBe(220);
     expect(s.pingDurationS).toBe(3.3);
     expect(s.volume).toBe(56);
+    expect(s.lockedPointerSensitivity).toBe(0.85); // steps of 0.05
+    expect(normalizeSettings({ lockedPointerSensitivity: 9 }).lockedPointerSensitivity).toBe(5);
+    expect(normalizeSettings({}).lockedPointerSensitivity).toBe(1);
   });
 
   it('replaces wrong types and non-finite numbers with defaults', () => {

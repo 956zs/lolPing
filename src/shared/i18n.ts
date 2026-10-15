@@ -52,6 +52,8 @@ const en = {
   customKeyNote: 'This key won’t type in other apps while lolPing is on',
   dragDistance: 'Drag distance',
   dragDistanceDesc: 'How far the mouse must move before the wheel opens',
+  lockedSensitivity: 'Sensitivity in games that take the mouse',
+  lockedSensitivityDesc: 'A game that locks the pointer (osu!lazer with high precision mouse) moves its own cursor. Set its mouse sensitivity here so the wheel opens on that cursor',
   clickPing: (trigger: string) => `${trigger} + click places a ping`,
   clickPingDesc: (trigger: string) =>
     `Places the ping in the centre of the wheel. When off, ${trigger} + click passes straight through to the app underneath`,
@@ -317,6 +319,8 @@ const zh: Strings = {
   customKeyNote: 'lolPing 开启时，此键在其他程序中不会输入字符',
   dragDistance: '拖动距离',
   dragDistanceDesc: '鼠标移动多远后才打开轮盘',
+  lockedSensitivity: '接管鼠标的游戏中的灵敏度',
+  lockedSensitivityDesc: '锁定指针的游戏（如开启高精度鼠标的 osu!lazer）自己移动光标。在这里填入它的鼠标灵敏度，轮盘就会开在那个光标上',
   clickPing: (trigger) => `${trigger} + 单击发送信号`,
   clickPingDesc: (trigger) => `发送轮盘中心的信号。关闭时，${trigger} + 单击会直接传给下方的程序`,
   gameCheck: '全屏程序中暂停',
