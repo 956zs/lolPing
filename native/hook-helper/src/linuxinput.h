@@ -107,9 +107,13 @@ class CursorEmits {
  public:
   using Query = std::function<bool(int& x, int& y)>;  // asks the compositor; false when it didn't answer
 
-  // Polls the compositor must stay exactly at the press after raw motion passed the threshold, before the pointer
-  // counts as locked. A busy compositor can be a frame behind the mouse; a locked one never catches up.
+  // Polls the compositor must answer exactly the press after raw motion passed the threshold, beyond the first,
+  // before the pointer counts as locked. A busy compositor can be a frame behind the mouse; a locked one never
+  // catches up.
   static constexpr int kLockConfirmPolls = 2;
+  // Polls of an open wheel that find the cursor back exactly on the press while the mouse moved, before the
+  // gesture counts as locked: Hyprland moves a locked cursor and warps it back, so a poll can catch it away.
+  static constexpr int kReturnPolls = 2;
   static constexpr double kDefaultPxPerCount = 1.0;  // libinput's unit is about one pixel at 1000 DPI
 
   explicit CursorEmits(Query query) : query_(std::move(query)) {}
@@ -138,7 +142,9 @@ class CursorEmits {
  private:
   bool where(int& x, int& y);  // asks the compositor, or falls back to its last answer (false)
   void rawPoint(int& x, int& y) const;  // the press plus the scaled raw motion since
-  void learnScale();                    // at the end of a gesture the compositor followed
+  bool rawPastThreshold() const;
+  bool atPress(int x, int y) const;
+  void learnScale();  // at the end of a gesture the compositor followed
   void gestureEnded();
 
   Query query_;
@@ -146,7 +152,9 @@ class CursorEmits {
   bool pending_ = false;
   bool pressKnown_ = false;  // the compositor answered at the press; if not, the first poll that gets an answer sets it
   bool locked_ = false;
-  int stillPolls_ = 0;  // polls in a row with raw motion past the threshold and the compositor still at the press
+  bool movedSincePoll_ = false;
+  int stillPolls_ = 0;   // pending polls with raw motion past the threshold and the compositor still at the press
+  int returnPolls_ = 0;  // open polls that found the cursor back on the press while the mouse moved
   int thresholdPx_ = 0;
   WheelKind wheel_ = WheelKind::Ping;
   int pressX_ = 0, pressY_ = 0;

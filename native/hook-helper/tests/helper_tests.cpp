@@ -1478,15 +1478,79 @@ static void test_linux_a_cursor_that_moves_is_never_locked() {
   p.onMotion(500, 500);  // ignored: the compositor's cursor is the position
   const auto m = p.onPoll().move;
   CHECK(m && m->x == 118 && m->y == 100);
-  // A cursor that moves by one pixel at the wrong moment resets the count: the lock needs an unbroken run.
+  // A cursor that has moved off the press and stays there is never locked, however far the mouse goes.
   FakeCursor d;
-  d.answers = {{0, 0}, {0, 0}, {0, 0}, {1, 0}, {1, 0}, {1, 0}};
+  d.answers = {{0, 0}, {1, 0}, {1, 0}, {1, 0}, {1, 0}};
   lnx::CursorEmits q(d.query());
   q.onPress(8);
   q.onMotion(9, 0);
-  CHECK(!q.onPoll().dragged && !q.onPoll().dragged);  // two still polls
-  CHECK(!q.onPoll().dragged && !q.locked());          // moved to (1, 0): the run is broken
-  CHECK(!q.onPoll().dragged && !q.onPoll().dragged && !q.locked());  // (1, 0) is not the press: never locked
+  for (int i = 0; i < 4; ++i) CHECK(!q.onPoll().dragged && !q.locked());
+}
+
+static void test_linux_a_locked_cursor_caught_mid_warp_still_locks() {
+  // Hyprland moves a locked cursor and warps it back to the press, so a poll can land in between and see it away.
+  // During the press: an answer short of the threshold doesn't reset the count.
+  FakeCursor c;
+  c.answers = {{100, 100}, {100, 100}, {103, 101}, {100, 100}, {100, 100}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);
+  p.onMotion(30, 0);
+  CHECK(!p.onPoll().dragged);  // still 1
+  CHECK(!p.onPoll().dragged);  // (103, 101): caught mid-warp, ignored
+  CHECK(!p.onPoll().dragged);  // still 2
+  CHECK(p.onPoll().dragged && p.locked());  // still 3
+  p.onEmit(Emit{Emit::Kind::Cancel});
+  // An answer past the threshold opens the wheel the usual way; the cursor then keeps coming back to the press
+  // while the mouse moves on, and the gesture turns locked.
+  c.answers = {{100, 100}, {100, 100}, {300, 250}, {100, 100}, {100, 100}, {100, 100}};
+  p.onPress(8);
+  p.onMotion(30, 0);
+  CHECK(!p.onPoll().dragged);
+  CHECK(p.onPoll().dragged && !p.locked());  // (300, 250)
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  CHECK(e && e->x == 100 && e->y == 100);
+  p.onMotion(10, 0);
+  CHECK(!p.onPoll().move && !p.locked());  // back on the press: nothing to send yet (the wheel is already there)
+  p.onMotion(10, 0);
+  auto m = p.onPoll().move;
+  CHECK(p.locked() && m && m->x == 150 && m->y == 100);  // twice: locked, and the raw motion since the press shows
+  const int queries = c.queries;
+  p.onMotion(0, 40);
+  m = p.onPoll().move;
+  CHECK(m && m->x == 150 && m->y == 140 && c.queries == queries);
+  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(e && e->x == 150 && e->y == 140);
+  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);  // nothing learned from a gesture like that
+  // A wheel held still after it opened doesn't count: the cursor is on the press because the mouse didn't move.
+  c.answers = {{50, 50}, {70, 50}, {50, 50}, {50, 50}, {50, 50}, {50, 50}};
+  p.onPress(8);
+  p.onMotion(20, 0);
+  CHECK(p.onPoll().dragged);
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  for (int i = 0; i < 4; ++i) CHECK(!p.onPoll().move && !p.locked());
+}
+
+static void test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion() {
+  // The wheel opened on an answer caught mid-warp and was released before the polls could tell: the cursor is
+  // back on the press, but the mouse went 40 counts to the right.
+  FakeCursor c;
+  c.answers = {{50, 50}, {50, 50}, {200, 200}, {50, 50}};
+  lnx::CursorEmits p(c.query());
+  p.onPress(8);
+  p.onMotion(40, 0);
+  CHECK(!p.onPoll().dragged && p.onPoll().dragged && !p.locked());
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  auto e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(e && e->x == 90 && e->y == 50);
+  CHECK(p.pxPerCount() == lnx::CursorEmits::kDefaultPxPerCount);  // the answer on the press teaches nothing
+  // Released on the press after a mouse move too short for a drag: the compositor's answer stands.
+  c.answers = {{50, 50}, {50, 50}, {200, 200}, {50, 50}};
+  p.onPress(8);
+  p.onMotion(5, 0);
+  CHECK(!p.onPoll().dragged && p.onPoll().dragged);
+  p.onEmit(pointEmit(Emit::Kind::WheelOpen, 0, 0));
+  e = p.onEmit(pointEmit(Emit::Kind::WheelRelease, 0, 0));
+  CHECK(e && e->x == 50 && e->y == 50);
 }
 
 static void test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed() {
@@ -1627,6 +1691,8 @@ int main() {
   test_linux_locked_pointer_measures_the_gesture_in_raw_motion();
   test_linux_a_cursor_that_moves_is_never_locked();
   test_linux_raw_scale_is_learned_from_a_drag_the_compositor_followed();
+  test_linux_a_locked_cursor_caught_mid_warp_still_locks();
+  test_linux_release_on_the_press_after_a_drag_uses_the_raw_motion();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

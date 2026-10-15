@@ -216,12 +216,22 @@ void CursorEmits::rawPoint(int& x, int& y) const {
   y = pressY_ + static_cast<int>(std::lround(static_cast<double>(rawY_) * pxPerCount_));
 }
 
+bool CursorEmits::rawPastThreshold() const {
+  int x = 0;
+  int y = 0;
+  rawPoint(x, y);
+  return movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_);
+}
+
+bool CursorEmits::atPress(int x, int y) const { return pressKnown_ && x == pressX_ && y == pressY_; }
+
 // Pixels per count from a drag the compositor followed. Only a real drag teaches anything: a short one is mostly
 // rounding, and libinput's acceleration makes the ratio depend on speed anyway, so the last drag is as good as any.
+// A gesture that showed any sign of a locked pointer teaches nothing: its answers were the warp, not the mouse.
 void CursorEmits::learnScale() {
   constexpr long kMinCounts = 10;
   constexpr double kMinScale = 0.05, kMaxScale = 20.0;
-  if (locked_ || !pressKnown_) return;
+  if (locked_ || !pressKnown_ || returnPolls_ > 0 || atPress(knownX_, knownY_)) return;
   const double counts = std::hypot(static_cast<double>(rawX_), static_cast<double>(rawY_));
   if (counts < kMinCounts || !movedPastThreshold(pressX_, pressY_, knownX_, knownY_, thresholdPx_)) return;
   const double px = std::hypot(static_cast<double>(knownX_ - pressX_), static_cast<double>(knownY_ - pressY_));
@@ -241,6 +251,8 @@ void CursorEmits::onPress(int thresholdPx) {
   pending_ = true;
   locked_ = false;
   stillPolls_ = 0;
+  returnPolls_ = 0;
+  movedSincePoll_ = false;
   rawX_ = 0;
   rawY_ = 0;
 }
@@ -251,6 +263,7 @@ void CursorEmits::onMotion(int dx, int dy) {
   if (!polling()) return;
   rawX_ += dx;
   rawY_ += dy;
+  movedSincePoll_ = movedSincePoll_ || dx != 0 || dy != 0;
 }
 
 std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
@@ -273,8 +286,10 @@ std::optional<Emit> CursorEmits::onEmit(const Emit& e) {
     case Emit::Kind::WheelMove:
       return std::nullopt;  // the poll sends real positions instead
     case Emit::Kind::WheelRelease:
-      if (locked_) rawPoint(out.x, out.y);
-      else where(out.x, out.y);
+      // A cursor back exactly on the press after a drag past the threshold is a locked pointer the polls hadn't
+      // caught yet: the raw motion says where the mouse went.
+      if (!locked_) where(out.x, out.y);
+      if (locked_ || (atPress(out.x, out.y) && rawPastThreshold())) rawPoint(out.x, out.y);
       gestureEnded();
       return out;
     case Emit::Kind::Cancel:
@@ -298,6 +313,8 @@ CursorEmits::Poll CursorEmits::onPoll() {
     knownX_ = x;
     knownY_ = y;
   }
+  const bool moved = movedSincePoll_;
+  movedSincePoll_ = false;
   if (pending_) {
     if (!pressKnown_) {  // no answer at the press: measure from the first one
       pressX_ = x;
@@ -306,23 +323,23 @@ CursorEmits::Poll CursorEmits::onPoll() {
     } else if (movedPastThreshold(pressX_, pressY_, x, y, thresholdPx_)) {
       pending_ = false;  // once: the wheel's open emit or the press's end comes next
       p.dragged = true;
-    } else {
-      int rx = 0;
-      int ry = 0;
-      rawPoint(rx, ry);
-      // The mouse has moved far enough but the cursor hasn't moved at all: a locked pointer, once it has stayed
-      // that way longer than a compositor that is merely behind.
-      if (x == pressX_ && y == pressY_ && movedPastThreshold(pressX_, pressY_, rx, ry, thresholdPx_)) {
-        if (++stillPolls_ > kLockConfirmPolls) {
-          locked_ = true;
-          pending_ = false;
-          p.dragged = true;
-        }
-      } else {
-        stillPolls_ = 0;
+    } else if (atPress(x, y) && rawPastThreshold()) {
+      // The mouse has moved far enough but the cursor is still on the press: a locked pointer, once it has stayed
+      // that way longer than a compositor that is merely behind. An answer a few pixels away in between doesn't
+      // count against it: Hyprland moves a locked cursor and warps it back, and a poll can land in between.
+      if (++stillPolls_ > kLockConfirmPolls) {
+        locked_ = true;
+        pending_ = false;
+        p.dragged = true;
       }
     }
     return p;
+  }
+  // The wheel opened on an answer caught between a locked cursor's move and its warp back: the cursor keeps coming
+  // back exactly to the press while the mouse moves on. A drag the compositor follows never does that twice.
+  if (!locked_ && moved && atPress(x, y) && ++returnPolls_ >= kReturnPolls) {
+    locked_ = true;
+    rawPoint(x, y);
   }
   if (x == sentX_ && y == sentY_) return p;
   sentX_ = x;
